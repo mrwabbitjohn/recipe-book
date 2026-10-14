@@ -29,19 +29,36 @@ function toGeminiInput(content) {
       : { type: "text", text: part.text });
 }
 
-function friendlyError(status, body) {
+// Older model with its own free quota, used when the main one is overloaded or rate limited.
+const FALLBACK_MODEL = { id: "gemini-2.5-flash", label: "Gemini 2.5 Flash" };
+
+function errorInfo(status, body) {
   const err = Array.isArray(body) ? body[0]?.error : body?.error;
-  const reason = err?.details?.find((d) => d.reason)?.reason || err?.status || "";
-  const message = err?.message || "";
+  return {
+    status,
+    reason: err?.details?.find((d) => d.reason)?.reason || err?.status || "",
+    message: err?.message || "",
+  };
+}
+
+function friendlyError({ status, reason, message }) {
   if (reason === "API_KEY_INVALID" || /api key not valid/i.test(message)) {
     return new GeminiError("Your Gemini API key was rejected. Check it in Settings.");
   }
   if (status === 429) {
     return new GeminiError("You've hit Gemini's free limit for now. Wait a minute (or until tomorrow if it's the daily limit), or switch to Claude in Settings.");
   }
-  if (status === 403) return new GeminiError("Your Gemini key isn't allowed to use this. Check it at aistudio.google.com.");
-  if (status >= 500) return new GeminiError("Gemini is having trouble right now. Try again in a minute.");
-  return new GeminiError(`Gemini error (${status}): ${message || "request failed"}`);
+  if (status === 403) return new GeminiError(`Your Gemini key isn't allowed to use this. Google said: ${message || reason || "permission denied"}`);
+  const said = message ? ` Google said: "${message}"` : "";
+  if (status >= 500) return new GeminiError(`Gemini had a problem (error ${status}).${said} Try again in a minute.`);
+  return new GeminiError(`Gemini error (${status}).${said}`);
+}
+
+class HttpFailure extends Error {
+  constructor(info) {
+    super(info.message || `HTTP ${info.status}`);
+    this.info = info;
+  }
 }
 
 async function post(apiKey, body) {
@@ -56,7 +73,7 @@ async function post(apiKey, body) {
     throw new GeminiError("Couldn't reach Gemini. Check your internet connection.");
   }
   const data = await res.json().catch(() => null);
-  if (!res.ok) throw friendlyError(res.status, data);
+  if (!res.ok) throw new HttpFailure(errorInfo(res.status, data));
   return data;
 }
 
@@ -66,7 +83,7 @@ function outputText(interaction) {
   return (last?.content || []).filter((c) => c.type === "text").map((c) => c.text).join("");
 }
 
-// Pulls a JSON object out of free text (used when structured output isn't available with tools).
+// Pulls a JSON object out of free text (used when structured output isn't accepted).
 function parseLooseJson(text) {
   const cleaned = text.replace(/^```(?:json)?\s*|\s*```$/g, "").trim();
   try {
@@ -79,49 +96,79 @@ function parseLooseJson(text) {
   }
 }
 
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
 export async function geminiStructured({ apiKey, system, schema, content, webFetch = false, thinking = "low" }) {
   if (!apiKey) throw new GeminiError("Add your Gemini API key in Settings to use AI features.");
-  const base = {
-    model: GEMINI_MODEL.id,
-    input: toGeminiInput(content),
-    system_instruction: system,
-    generation_config: { thinking_level: thinking, max_output_tokens: 16000 },
-    store: false,
-    ...(webFetch ? { tools: [{ type: "url_context" }] } : {}),
-  };
   const geminiSchema = toGeminiSchema(schema);
+  const jsonInstructions = `${system}\n\nReply with ONLY a JSON object (no prose, no code fences) matching this JSON schema:\n${JSON.stringify(geminiSchema)}`;
 
-  let interaction;
-  let structured = true;
-  try {
-    interaction = await post(apiKey, {
-      ...base,
-      response_format: { type: "text", mime_type: "application/json", schema: geminiSchema },
-    });
-  } catch (err) {
-    // Structured output together with tools is a preview feature; fall back to asking for JSON in text.
-    if (!webFetch || !(err instanceof GeminiError) || !/\(400\)/.test(err.message)) throw err;
-    structured = false;
-    interaction = await post(apiKey, {
-      ...base,
-      system_instruction: `${system}\n\nReply with ONLY a JSON object (no prose, no code fences) matching this JSON schema:\n${JSON.stringify(geminiSchema)}`,
-    });
-  }
+  // Each attempt is a little more conservative than the last, so a temporary overload,
+  // an unsupported request option, or a busy model doesn't stop the import.
+  const attempts = [
+    { model: GEMINI_MODEL, structured: true },
+    { model: GEMINI_MODEL, structured: true, waitMs: 1500 },
+    { model: GEMINI_MODEL, structured: false },
+    { model: FALLBACK_MODEL, structured: false },
+  ];
 
-  if (interaction.status === "failed") {
-    const msg = interaction.errors?.[0]?.message || "the request failed";
-    throw new GeminiError(`Gemini couldn't finish: ${msg}`);
-  }
-  if (interaction.status === "incomplete") throw new GeminiError("Gemini's answer was cut off. Please try again.");
+  let lastInfo = null;
+  for (let i = 0; i < attempts.length; i++) {
+    const { model, structured, waitMs } = attempts[i];
+    if (waitMs) await sleep(waitMs);
+    const body = {
+      model: model.id,
+      input: toGeminiInput(content),
+      system_instruction: structured ? system : jsonInstructions,
+      generation_config: {
+        max_output_tokens: 16000,
+        // thinking_level is a Gemini 3 setting; leave the older fallback model on its defaults.
+        ...(model === GEMINI_MODEL ? { thinking_level: thinking } : {}),
+      },
+      store: false,
+      ...(webFetch ? { tools: [{ type: "url_context" }] } : {}),
+      ...(structured ? { response_format: { type: "text", mime_type: "application/json", schema: geminiSchema } } : {}),
+    };
 
-  const text = outputText(interaction);
-  let data;
-  try {
-    data = structured ? JSON.parse(text) : parseLooseJson(text);
-  } catch {
-    throw new GeminiError("Gemini's answer couldn't be read. Please try again.");
+    let interaction;
+    try {
+      interaction = await post(apiKey, body);
+    } catch (err) {
+      if (!(err instanceof HttpFailure)) throw err;
+      lastInfo = err.info;
+      const { status, reason, message } = err.info;
+      if (reason === "API_KEY_INVALID" || /api key not valid/i.test(message) || status === 403) throw friendlyError(err.info);
+      if (status === 429) {
+        // Try the fallback model's separate quota once, otherwise report the limit.
+        if (model !== FALLBACK_MODEL) {
+          i = attempts.length - 2;
+          continue;
+        }
+        throw friendlyError(err.info);
+      }
+      // A 400 on a structured attempt usually means the schema/format wasn't accepted: skip to plain JSON.
+      if (status === 400 && structured) {
+        i = 1;
+        continue;
+      }
+      if (status >= 500 || status === 404) continue;
+      throw friendlyError(err.info);
+    }
+
+    if (interaction.status === "failed") {
+      lastInfo = { status: 500, reason: "", message: interaction.errors?.[0]?.message || "the request failed" };
+      continue;
+    }
+    if (interaction.status === "incomplete") throw new GeminiError("Gemini's answer was cut off. Please try again.");
+
+    const text = outputText(interaction);
+    try {
+      return { data: structured ? JSON.parse(text) : parseLooseJson(text), cost: 0, model: model.label };
+    } catch {
+      lastInfo = { status: 500, reason: "", message: "the answer wasn't valid JSON" };
+    }
   }
-  return { data, cost: 0, model: GEMINI_MODEL.label };
+  throw friendlyError(lastInfo || { status: 500, reason: "", message: "" });
 }
 
 // Cheap check used by Settings: list models with the key.
@@ -131,7 +178,7 @@ export async function testGeminiKey(apiKey) {
       headers: { "x-goog-api-key": apiKey },
     });
     if (res.ok) return null;
-    return friendlyError(res.status, await res.json().catch(() => null)).message;
+    return friendlyError(errorInfo(res.status, await res.json().catch(() => null))).message;
   } catch {
     return "Couldn't reach Google. Check your internet connection.";
   }
