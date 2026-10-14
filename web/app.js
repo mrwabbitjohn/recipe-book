@@ -2,7 +2,7 @@
 // Everything runs on the phone: data in IndexedDB, AI calls straight to Claude with your own key.
 import { api, withStores, exportBackup, importBackup } from "./localapi.js";
 import { getMeta, setMeta, requestPersistence } from "./store.js";
-import { MODELS, extractFromUrl, extractFromImages, extractFromText, testKey, askAboutRecipe, providerLabel } from "./ai.js";
+import { MODELS, extractFromUrl, extractFromImages, extractFromText, extractFromVideo, testKey, askAboutRecipe, providerLabel } from "./ai.js";
 import { testGeminiKey } from "./gemini.js";
 import { parseRecipeText, parseQty } from "./parse.js";
 
@@ -332,7 +332,7 @@ async function viewRecipe(id) {
     const rows = recipe.ingredients.map((ing) => {
       const head = ing.section && ing.section !== lastSection ? `<div class="ing-section">${esc(ing.section)}</div>` : "";
       lastSection = ing.section;
-      const qty = [formatQty(scaled(ing.quantity)), ing.unit].filter(Boolean).join(" ");
+      const qty = [ing.estimated ? "≈" : "", formatQty(scaled(ing.quantity)), ing.unit].filter(Boolean).join(" ");
       return `${head}<div class="ing ${cook.have.has(ing.id) ? "have" : ""}" data-id="${ing.id}">
         <input type="checkbox" data-have ${cook.have.has(ing.id) ? "checked" : ""} aria-label="I have this">
         <div>
@@ -353,7 +353,7 @@ async function viewRecipe(id) {
           <button class="btn small" data-serv="-1" aria-label="Fewer servings">−</button>
           <span class="val">${cook.servings}</span>
           <button class="btn small" data-serv="1" aria-label="More servings">+</button></div>` : ""}
-        <p class="muted" style="font-size:13px;margin:0 0 4px">Tick what you already have — the rest can go on your shopping list.</p>
+        <p class="muted" style="font-size:13px;margin:0 0 4px">Tick what you already have — the rest can go on your shopping list.${recipe.ingredients.some((i) => i.estimated) ? " <b>≈</b> means the AI estimated the amount because the source didn't give one." : ""}</p>
         ${rows || '<p class="muted">No ingredients listed.</p>'}
       </div>
       <div class="drawer-foot"><button class="btn primary" style="width:100%" id="add-all" ${need ? "" : "disabled"}>${icon.cart} Add ${need} item${need === 1 ? "" : "s"} to shopping list</button></div>`;
@@ -470,7 +470,7 @@ async function viewRecipe(id) {
     const removals = [];
     for (const c of res.ingredientChanges) {
       const n = c.number - 1;
-      const fresh = { quantity: c.quantity, unit: c.unit, name: c.name, note: c.note, aisle: c.aisle };
+      const fresh = { quantity: c.quantity, unit: c.unit, name: c.name, note: c.note, aisle: c.aisle, estimated: false };
       if (c.action === "replace" && ingredients[n]) ingredients[n] = { ...ingredients[n], ...fresh };
       else if (c.action === "remove" && ingredients[n]) removals.push(n);
       else if (c.action === "add") ingredients.push({ section: ingredients.at(-1)?.section || "", ...fresh });
@@ -628,19 +628,34 @@ async function addSpend(cost) {
   await setMeta("spend", { total: spend.total + cost, count: spend.count + 1 });
 }
 
+// YouTube (including Shorts) video id from a link, or null.
+function youtubeId(url) {
+  const m = String(url).match(/(?:youtube\.com\/(?:watch\?(?:.*&)?v=|shorts\/|live\/|embed\/)|youtu\.be\/)([\w-]{11})/i);
+  return m ? m[1] : null;
+}
+const isSocialVideoLink = (url) => /(?:tiktok\.com|instagram\.com\/(?:reel|p)\/|facebook\.com\/(?:reel|watch)|fb\.watch)/i.test(url);
+
+const SOCIAL_VIDEO_HELP = "TikTok, Instagram and Facebook don't let apps read their videos. Instead: in the app, tap Share → Save video (or Download), then share the saved video from your gallery to Recipe Book. Screenshots of the ingredients work too.";
+
 // Runs an AI import and stores the result as a draft for the review screen.
 async function runAI(kind, payload, tier = "cheap") {
   const cfg = await aiConfig();
-  const extractor = { url: extractFromUrl, photo: extractFromImages, text: extractFromText }[kind];
+  const extractor = { url: extractFromUrl, photo: extractFromImages, text: extractFromText, video: extractFromVideo }[kind];
   const { recipe, cost, model } = await extractor(cfg, tier, payload);
   await addSpend(cost);
   const { imageUrl, ...rest } = recipe;
+  const ytId = kind === "video" && payload.link ? youtubeId(payload.link) : null;
   state.draft = await withStores({
     ...rest,
-    image: kind === "url" && /^https?:\/\//.test(imageUrl) ? imageUrl : null,
-    source: kind === "url" ? payload : kind === "photo" ? "Photo import" : "Pasted text",
+    image: ytId
+      ? `https://i.ytimg.com/vi/${ytId}/hqdefault.jpg`
+      : kind === "url" && /^https?:\/\//.test(imageUrl) ? imageUrl : null,
+    source: kind === "url" ? payload
+      : kind === "video" ? payload.link || "Video import"
+      : kind === "photo" ? "Photo import" : "Pasted text",
   });
-  state.lastImport = { kind, payload, tier, cost, model, provider: cfg.provider };
+  // Video always runs on Gemini, whichever provider is selected.
+  state.lastImport = { kind, payload, tier, cost, model, provider: kind === "video" ? "gemini" : cfg.provider };
 }
 
 async function runFreeParse(text) {
@@ -658,7 +673,10 @@ async function takeSharedPayload() {
   const files = [];
   for (let i = 0; i < meta.fileCount; i++) {
     const r = await cache.match(`file-${i}`);
-    if (r) files.push(new File([await r.blob()], `shared-${i}.jpg`, { type: r.headers.get("content-type") || "image/jpeg" }));
+    if (r) {
+      const type = r.headers.get("content-type") || "image/jpeg";
+      files.push(new File([await r.blob()], `shared-${i}.${type.split("/")[1] || "bin"}`, { type }));
+    }
   }
   await caches.delete("share-inbox");
   return { ...meta, files };
@@ -671,12 +689,18 @@ async function viewImport(query = "") {
   const who = isFree(cfg) ? "Gemini" : "Claude";
   let tab = "url";
   let photos = [];
+  let video = null; // { file, url } for a video picked or shared from the gallery
   let prefill = { url: "", text: "" };
   let autoRun = false;
+  const MAX_VIDEO_MB = 60;
 
   if (new URLSearchParams(query).get("shared")) {
     const shared = await takeSharedPayload();
-    if (shared?.files.length) {
+    const sharedVideo = shared?.files.find((f) => f.type.startsWith("video/"));
+    if (sharedVideo) {
+      tab = "photo";
+      video = { file: sharedVideo, url: URL.createObjectURL(sharedVideo) };
+    } else if (shared?.files.length) {
       tab = "photo";
       for (const f of shared.files) {
         try {
@@ -689,7 +713,7 @@ async function viewImport(query = "") {
       if (link) {
         tab = "url";
         prefill.url = link;
-        autoRun = hasKey;
+        autoRun = hasKey || (cfg.geminiKey && youtubeId(link));
       } else {
         tab = "text";
         prefill.text = [shared.title, shared.text].filter(Boolean).join("\n");
@@ -705,11 +729,11 @@ async function viewImport(query = "") {
     ${hasKey ? "" : `<div class="notice">AI import needs a free Gemini key (or a Claude key). <a href="#/settings">Add one in Settings</a>; it takes a couple of minutes. Until then you can use <b>Quick parse</b> on pasted text, or <a href="#/new">type a recipe in</a>.</div>`}
     <div class="tabs" role="tablist">
       <button data-tab="url">🔗 Link</button>
-      <button data-tab="photo">📷 Photo</button>
+      <button data-tab="photo">📷 Photo/Video</button>
       <button data-tab="text">📝 Text</button>
     </div>
     <div class="card panel" id="panel"></div>
-    <p class="muted" style="font-size:13px;margin-top:12px">Tip: in Chrome or your gallery, tap <b>Share → Recipe Book</b> to send a link or photo straight here.</p>`;
+    <p class="muted" style="font-size:13px;margin-top:12px">Tip: from Chrome, YouTube or your gallery, tap <b>Share → Recipe Book</b> to send a link, photo or video straight here.</p>`;
 
   const panel = app.querySelector("#panel");
   const setTab = (t) => {
@@ -723,16 +747,22 @@ async function viewImport(query = "") {
     const err = error ? `<div class="error">${esc(error)}</div>` : "";
     if (tab === "url") {
       panel.innerHTML = `${err}<form id="f">
-        <label class="field">Recipe webpage link<input class="input" name="url" type="url" inputmode="url" placeholder="https://…" value="${esc(prefill.url)}" required></label>
-        <button class="btn primary" style="width:100%" ${hasKey ? "" : "disabled"}>Import from link</button></form>
-        ${costNote(isFree(cfg) ? "Free with Gemini" : "Usually under 1¢ with Claude Haiku")}`;
+        <label class="field">Recipe webpage or YouTube link<input class="input" name="url" type="url" inputmode="url" placeholder="https://…" value="${esc(prefill.url)}" required></label>
+        <button class="btn primary" style="width:100%" ${hasKey || cfg.geminiKey ? "" : "disabled"}>Import from link</button></form>
+        ${costNote(isFree(cfg) ? "Free with Gemini · YouTube videos and Shorts are watched, sound included" : "Usually under 1¢ with Claude Haiku · YouTube links use Gemini")}`;
     } else if (tab === "photo") {
-      panel.innerHTML = `${err}
+      panel.innerHTML = video ? `${err}
+        <video src="${video.url}" controls muted playsinline class="video-prev"></video>
+        <div class="row" style="margin-top:8px"><span class="muted" style="flex:1;font-size:13px">${(video.file.size / 1048576).toFixed(1)} MB video</span>
+          <button class="btn small ghost" id="rm-video">Remove</button></div>
+        <button class="btn primary" style="width:100%;margin-top:12px" id="go" ${cfg.geminiKey ? "" : "disabled"}>Watch video &amp; get recipe</button>
+        ${costNote(cfg.geminiKey ? "Free with Gemini · uses what's said, on-screen text and what's shown" : "Reading videos needs a free Gemini key (Claude can't watch video). Add one in Settings.")}`
+      : `${err}
         <label class="dropzone" id="drop">
-          <input type="file" id="files" accept="image/*" multiple hidden>
+          <input type="file" id="files" accept="image/*,video/*" multiple hidden>
           <div style="font-size:30px">📷</div>
-          <strong>Take or choose photos</strong>
-          <div style="font-size:14px">Cookbook pages, recipe cards, screenshots. Add several if the recipe spans pages.</div>
+          <strong>Take or choose photos, or a video</strong>
+          <div style="font-size:14px">Cookbook pages, recipe cards, screenshots, or a saved TikTok/Reel/cooking video.</div>
         </label>
         <div class="thumbs">${photos.map((p, i) => `<div class="t"><img src="${p.preview}" alt=""><button data-rm="${i}" aria-label="Remove">×</button></div>`).join("")}</div>
         <button class="btn primary" style="width:100%;margin-top:12px" id="go" ${photos.length && hasKey ? "" : "disabled"}>Read ${photos.length || ""} photo${photos.length === 1 ? "" : "s"}</button>
@@ -750,13 +780,35 @@ async function viewImport(query = "") {
   setTab(tab);
 
   async function run(kind, payload) {
-    panel.innerHTML = `<div class="working"><div class="spinner"></div><strong>Reading your recipe…</strong><span class="muted">This usually takes 10–30 seconds.</span></div>`;
+    const watching = kind === "video";
+    panel.innerHTML = `<div class="working"><div class="spinner"></div><strong>${watching ? "Watching the video…" : "Reading your recipe…"}</strong><span class="muted">${watching ? "Videos can take up to a minute." : "This usually takes 10–30 seconds."}</span></div>`;
     try {
       await runAI(kind, payload);
       location.hash = "#/review";
     } catch (err) {
-      renderPanel(err.message);
+      renderPanel(kind === "url" && isSocialVideoLink(payload) ? SOCIAL_VIDEO_HELP : err.message);
     }
+  }
+
+  // Links: YouTube is watched as a video; TikTok/Instagram get a hint; everything else is read as a page.
+  function importLink(url) {
+    prefill.url = url;
+    const id = youtubeId(url);
+    if (id) return run("video", { uri: `https://www.youtube.com/watch?v=${id}`, link: url });
+    return run("url", url);
+  }
+
+  async function readVideoFile() {
+    if (video.file.size > MAX_VIDEO_MB * 1048576) {
+      return renderPanel(`That video is ${(video.file.size / 1048576).toFixed(0)} MB. Videos up to ${MAX_VIDEO_MB} MB work; try a shorter clip or screenshots.`);
+    }
+    const data = await new Promise((resolve, reject) => {
+      const r = new FileReader();
+      r.onload = () => resolve(String(r.result).split(",")[1]);
+      r.onerror = () => reject(r.error);
+      r.readAsDataURL(video.file);
+    });
+    run("video", { data, mimeType: video.file.type || "video/mp4" });
   }
 
   app.querySelector(".tabs").addEventListener("click", (e) => {
@@ -765,6 +817,14 @@ async function viewImport(query = "") {
   });
 
   async function addFiles(files) {
+    const vid = files.find((f) => f.type.startsWith("video/"));
+    if (vid) {
+      // One video at a time; it replaces any photos.
+      if (video) URL.revokeObjectURL(video.url);
+      video = { file: vid, url: URL.createObjectURL(vid) };
+      photos = [];
+      return renderPanel();
+    }
     for (const f of files) {
       if (!f.type.startsWith("image/")) continue;
       try {
@@ -779,7 +839,7 @@ async function viewImport(query = "") {
   panel.addEventListener("submit", async (e) => {
     e.preventDefault();
     const fd = new FormData(e.target);
-    if (tab === "url") return run("url", String(fd.get("url")).trim());
+    if (tab === "url") return importLink(String(fd.get("url")).trim());
     const text = String(fd.get("text")).trim();
     prefill.text = text;
     if (e.submitter?.value === "free") {
@@ -798,8 +858,13 @@ async function viewImport(query = "") {
       e.preventDefault();
       photos.splice(Number(rm.dataset.rm), 1);
       renderPanel();
+    } else if (e.target.closest("#rm-video")) {
+      URL.revokeObjectURL(video.url);
+      video = null;
+      renderPanel();
     } else if (e.target.closest("#go")) {
-      run("photo", photos.map(({ mediaType, data }) => ({ mediaType, data })));
+      if (video) readVideoFile();
+      else run("photo", photos.map(({ mediaType, data }) => ({ mediaType, data })));
     }
   });
   panel.addEventListener("dragover", (e) => {
@@ -812,7 +877,7 @@ async function viewImport(query = "") {
     if (tab === "photo") addFiles([...e.dataTransfer.files]);
   });
 
-  if (autoRun) run("url", prefill.url);
+  if (autoRun) importLink(prefill.url);
 }
 
 // ---------- settings ----------
@@ -1007,8 +1072,10 @@ function draftBanner() {
       ? `<button type="button" class="btn small" id="retry">Not right? Try harder (free)</button>`
       : `<button type="button" class="btn small" id="retry">Not right? Try harder with ${MODELS.strong.label} (~5–10¢)</button>`;
   }
+  const estimates = state.draft?.ingredients?.filter((i) => i.estimated).length || 0;
   const how = li.kind === "free" ? "Parsed for free" : `Read by ${li.model} · ${li.cost === 0 ? "free" : `about ${formatCost(li.cost)}`}`;
   return `<div class="notice"><div>Here's what ${li.kind === "free" ? "the quick parser" : li.provider === "gemini" ? "Gemini" : "Claude"} found. Fix anything that's off, then save.</div>
+    ${estimates ? `<div style="font-size:13px;margin-top:4px"><b>≈</b> ${estimates} amount${estimates === 1 ? " wasn't" : "s weren't"} given in the source, so ${estimates === 1 ? "it was" : "they were"} estimated. Check ${estimates === 1 ? "it" : "them"} below.</div>` : ""}
     <div class="muted" style="font-size:13px;margin:4px 0 8px">${how}</div>${retry}</div>`;
 }
 
@@ -1093,7 +1160,9 @@ async function viewEditor(id) {
   function collect() {
     ings.querySelectorAll("[data-i]").forEach((row) => {
       const ing = recipe.ingredients[row.dataset.i];
-      ing.quantity = row.querySelector("[name=q]").value;
+      const qInput = row.querySelector("[name=q]");
+      if (qInput.value !== qInput.dataset.orig) ing.estimated = false; // you set it yourself
+      ing.quantity = qInput.value;
       ing.unit = row.querySelector("[name=u]").value;
       ing.name = row.querySelector("[name=n]").value;
       ing.note = row.querySelector("[name=no]").value;
@@ -1110,11 +1179,12 @@ async function viewEditor(id) {
       <div data-i="${i}" style="margin-bottom:10px">
         ${ing.section && ing.section !== recipe.ingredients[i - 1]?.section ? `<div class="ing-section">${esc(ing.section)}</div>` : ""}
         <div class="erow">
-          <input class="input" name="q" inputmode="decimal" value="${v(ing.quantity)}" placeholder="1">
+          <input class="input${ing.estimated ? " est" : ""}" name="q" inputmode="decimal" value="${v(ing.quantity)}" data-orig="${v(ing.quantity)}" placeholder="1" ${ing.estimated ? 'title="Estimated by AI"' : ""}>
           <input class="input" name="u" value="${v(ing.unit)}" placeholder="cup">
           <input class="input" name="n" value="${v(ing.name)}" placeholder="flour">
           <button type="button" class="iconbtn" data-rm-ing="${i}" aria-label="Remove">${icon.close}</button>
           <input class="input note-in" name="no" value="${v(ing.note)}" placeholder="note (optional)">
+          ${ing.estimated ? '<span class="est-tag">≈ amount estimated by AI — edit it to confirm</span>' : ""}
         </div>
       </div>`).join("");
     stepsEl.innerHTML = recipe.steps.map((s, i) => `

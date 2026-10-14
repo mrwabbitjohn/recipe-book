@@ -78,6 +78,7 @@ function cleanRecipe(input, existing = {}) {
         name: String(i.name).trim(),
         note: String(i.note || ""),
         aisle: String(i.aisle || "Other"),
+        estimated: Boolean(i.estimated) && i.quantity != null, // amount guessed by the AI, shown with ≈
       })),
     steps: (input.steps || [])
       .filter((s) => s && String(s.text || "").trim())

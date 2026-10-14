@@ -32,9 +32,10 @@ const RECIPE_SCHEMA = {
       items: {
         type: "object",
         additionalProperties: false,
-        required: ["section", "quantity", "unit", "name", "note", "aisle"],
+        required: ["section", "quantity", "unit", "name", "note", "aisle", "estimated"],
         properties: {
           section: { type: "string", description: 'Group heading like "Sauce", or "" if none' },
+          estimated: { type: "boolean", description: "true if you filled in or firmed up the amount because the source didn't give one" },
           quantity: nullable("number"),
           unit: { type: "string" },
           name: { type: "string", description: "Plain ingredient name, e.g. 'yellow onion'" },
@@ -70,12 +71,16 @@ const RECIPE_SCHEMA = {
 
 const SYSTEM = `You turn recipes into clean structured data for a personal recipe app.
 
-- Copy the recipe faithfully. Do not invent ingredients, quantities or steps that aren't in the source.
+- Copy the recipe faithfully. Do not invent ingredients or steps that aren't in the source.
 - Ignore ads, life stories, comments and navigation on webpages.
-- Quantities are numbers: "1 1/2" -> 1.5, "½" -> 0.5. Ranges use the lower bound and mention the range in the note. "to taste" -> quantity null.
+- Quantities are numbers: "1 1/2" -> 1.5, "½" -> 0.5. Ranges use the lower bound and mention the range in the note.
+- Amounts the source gives exactly are copied as-is with estimated=false.
+- When the source gives no amount or only a vague one ("a splash of soy sauce", "some garlic", "a handful of basil"), fill in a sensible typical amount for this recipe and its servings, set estimated=true, and keep the source's wording in the note (e.g. note "a splash"). Salt and pepper "to taste" can stay quantity null with estimated=false.
+- If the source doesn't say how many it serves, estimate servings from the amounts.
 - Keep units short (tsp, tbsp, cup, g, kg, ml, l, oz, lb, clove, can) or "" for countable items ("2 eggs").
 - Split steps into one clear action group each. Keep the original wording where reasonable.
 - For handwritten cards or photos of cookbook pages, read carefully; combine multiple photos into one recipe.
+- For cooking videos, use everything: what's said, on-screen text and captions, and what you can see being added. Turn timings mentioned or shown into step timers.
 - If there is no recipe in the input, set found=false and leave the other fields empty.`;
 
 export class ImportError extends Error {}
@@ -216,6 +221,23 @@ export function extractFromImages(cfg, tier, images) {
       ...images.map(({ mediaType, data }) => ({ type: "image", source: { type: "base64", media_type: mediaType, data } })),
       { type: "text", text: "Extract the recipe from these photo(s)." },
     ],
+  });
+}
+
+// Cooking videos (YouTube links, or a video file from TikTok/Instagram/the gallery). Gemini only:
+// Claude can't watch video, so this uses the Gemini key even when Claude is the chosen provider.
+export function extractFromVideo(cfg, tier, video) {
+  if (!cfg.geminiKey) {
+    throw new ImportError("Reading videos needs a free Gemini key (Claude can't watch video). Add one in Settings.");
+  }
+  const part = video.uri
+    ? { type: "video", uri: video.uri }
+    : { type: "video", data: video.data, mime_type: video.mimeType };
+  return extract({
+    cfg: { ...cfg, provider: "gemini" },
+    tier,
+    content: [part, { type: "text", text: "Watch this cooking video, including what's said and any on-screen text, and extract the recipe." }],
+    notFound: "Couldn't find a recipe in that video.",
   });
 }
 

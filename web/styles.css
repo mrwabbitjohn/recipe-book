@@ -280,3 +280,6 @@ details summary { cursor: pointer; }
 .ing-actions [data-swap] { font-size: 18px; font-weight: 700; }
 .choice { display: flex; gap: 10px; align-items: flex-start; padding: 10px 0; border-top: 1px solid var(--border); cursor: pointer; }
 .choice input { width: 20px; height: 20px; margin-top: 2px; accent-color: var(--accent); flex: none; }
+.video-prev { width: 100%; max-height: 320px; border-radius: 12px; background: #000; display: block; }
+.erow .input.est { border-style: dashed; border-color: var(--accent); }
+.est-tag { grid-column: 1 / -1; font-size: 12px; color: var(--accent); margin-top: -2px; }

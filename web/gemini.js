@@ -23,10 +23,11 @@ function toGeminiSchema(node) {
 
 // Claude-style content parts -> Gemini input parts.
 function toGeminiInput(content) {
-  return content.map((part) =>
-    part.type === "image"
-      ? { type: "image", data: part.source.data, mime_type: part.source.media_type }
-      : { type: "text", text: part.text });
+  return content.map((part) => {
+    if (part.type === "image") return { type: "image", data: part.source.data, mime_type: part.source.media_type };
+    if (part.type === "video") return part; // already in Gemini's shape: { type, uri } or { type, data, mime_type }
+    return { type: "text", text: part.text };
+  });
 }
 
 // Older model with its own free quota, used when the main one is overloaded or rate limited.

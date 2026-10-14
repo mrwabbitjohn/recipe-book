@@ -12,8 +12,11 @@ in Settings, using your own key:
 
 ## Using it
 
-- **Import**: tap *Import* and choose Link, Photo or Text, or use *Share → Recipe Book* from Chrome
-  or your gallery. You review everything before saving.
+- **Import**: tap *Import* and choose Link, Photo/Video or Text, or use *Share → Recipe Book* from
+  Chrome, YouTube or your gallery. You review everything before saving.
+  - YouTube links (including Shorts) and video files are watched by Gemini, sound and on-screen text
+    included. TikTok/Instagram block apps from reading their links: save the video, then share the file.
+  - When the source gives no amount ("a splash"), the AI fills in a sensible one and marks it **≈**.
   - With Gemini everything is free; *Try harder* re-reads with more thinking.
   - With Claude, imports cost well under 1¢ and *Try harder* uses Opus (about 5–10¢).
   - *Quick parse* on pasted text is free and works offline.
