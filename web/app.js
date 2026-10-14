@@ -1,6 +1,6 @@
 // Recipe Book front end: a small hash-routed single-page app with no build step.
 // Everything runs on the phone: data in IndexedDB, AI calls straight to Claude with your own key.
-import { api, withStores, exportBackup, importBackup } from "./localapi.js";
+import { api, withStores, exportBackup, importBackup, normalizeName } from "./localapi.js";
 import { getMeta, setMeta, requestPersistence } from "./store.js";
 import { MODELS, extractFromUrl, extractFromImages, extractFromText, extractFromVideo, testKey, askAboutRecipe, providerLabel, photoQueries, pickPhoto } from "./ai.js";
 import { findPhotos, downloadPhoto, previewsFor, queriesFromTitle } from "./photos.js";
@@ -337,25 +337,44 @@ async function viewRecipe(id) {
   const scale = () => (recipe.servings && cook.servings ? cook.servings / recipe.servings : 1);
   const scaled = (q) => (q == null ? null : q * scale());
 
+  // What's already on the shopping list, by ingredient name (an unticked entry wins over a bought one).
+  let listed = new Map();
+  async function loadListed() {
+    listed = new Map();
+    for (const item of await api("/api/shopping")) {
+      const key = normalizeName(item.name);
+      if (!listed.has(key) || !item.checked) listed.set(key, item);
+    }
+  }
+  const listStatus = (ing) => listed.get(normalizeName(ing.name)) || null;
+  const needsAdding = (ing) => !cook.have.has(ing.id) && !(listStatus(ing) && !listStatus(ing).checked);
+
   function renderDrawer() {
     let lastSection = null;
     const rows = recipe.ingredients.map((ing) => {
       const head = ing.section && ing.section !== lastSection ? `<div class="ing-section">${esc(ing.section)}</div>` : "";
       lastSection = ing.section;
       const qty = [ing.estimated ? "≈" : "", formatQty(scaled(ing.quantity)), ing.unit].filter(Boolean).join(" ");
+      const onList = listStatus(ing);
+      const listTag = onList
+        ? `<span class="list-tag${onList.checked ? " bought" : ""}">${onList.checked ? "✓ Bought" : `✓ On list${onList.quantity != null ? `: ${esc([formatQty(onList.quantity), onList.unit].filter(Boolean).join(" "))}` : ""}`}</span>`
+        : "";
       return `${head}<div class="ing ${cook.have.has(ing.id) ? "have" : ""}" data-id="${ing.id}">
         <input type="checkbox" data-have ${cook.have.has(ing.id) ? "checked" : ""} aria-label="I have this">
         <div>
           <div class="txt">${qty ? `<span class="qty">${esc(qty)}</span> ` : ""}${esc(ing.name)}${ing.note ? ` <span class="note">${esc(ing.note)}</span>` : ""}</div>
-          <div class="store-pick">${storeSelect(ing.store, "data-store")}</div>
+          <div class="store-pick">${storeSelect(ing.store, "data-store")}${listTag}</div>
         </div>
         <div class="ing-actions">
           <button class="iconbtn" data-swap title="Ask about a substitute" aria-label="Ask about a substitute for ${esc(ing.name)}">⇄</button>
-          <button class="iconbtn" data-add title="Add to shopping list" aria-label="Add ${esc(ing.name)} to shopping list">${icon.cart}</button>
+          ${onList && !onList.checked
+            ? `<button class="iconbtn on-list" data-add title="Already on your shopping list" aria-label="${esc(ing.name)} is on your shopping list">✓</button>`
+            : `<button class="iconbtn" data-add title="Add to shopping list" aria-label="Add ${esc(ing.name)} to shopping list">${icon.cart}</button>`}
         </div>
       </div>`;
     }).join("");
-    const need = recipe.ingredients.filter((i) => !cook.have.has(i.id)).length;
+    const need = recipe.ingredients.filter(needsAdding).length;
+    const allListed = !need && recipe.ingredients.some((i) => listStatus(i) && !listStatus(i).checked);
     drawer.innerHTML = `
       <div class="drawer-head"><h2>Ingredients</h2><button class="iconbtn" id="close-ing" aria-label="Close">${icon.close}</button></div>
       <div class="drawer-body">
@@ -366,9 +385,12 @@ async function viewRecipe(id) {
         <p class="muted" style="font-size:13px;margin:0 0 4px">Tick what you already have — the rest can go on your shopping list.${recipe.ingredients.some((i) => i.estimated) ? " <b>≈</b> means the AI estimated the amount because the source didn't give one." : ""}</p>
         ${rows || '<p class="muted">No ingredients listed.</p>'}
       </div>
-      <div class="drawer-foot"><button class="btn primary" style="width:100%" id="add-all" ${need ? "" : "disabled"}>${icon.cart} Add ${need} item${need === 1 ? "" : "s"} to shopping list</button></div>`;
+      <div class="drawer-foot"><button class="btn primary" style="width:100%" id="add-all" ${need ? "" : "disabled"}>${need
+        ? `${icon.cart} Add ${need} item${need === 1 ? "" : "s"} to shopping list`
+        : allListed ? "✓ Everything you need is on your list" : "Nothing to add"}</button></div>`;
   }
   renderDrawer();
+  loadListed().then(renderDrawer);
 
   const toShoppingItem = (ing) => ({
     name: ing.name,
@@ -387,11 +409,12 @@ async function viewRecipe(id) {
       return renderDrawer();
     }
     if (e.target.closest("#add-all")) {
-      const items = recipe.ingredients.filter((i) => !cook.have.has(i.id)).map(toShoppingItem);
+      const items = recipe.ingredients.filter(needsAdding).map(toShoppingItem);
       await api("/api/shopping", { method: "POST", body: { items } });
       toast(`Added ${items.length} item${items.length === 1 ? "" : "s"} to your shopping list`);
       refreshShoppingBadge();
-      return;
+      await loadListed();
+      return renderDrawer();
     }
     const row = e.target.closest(".ing");
     if (!row) return;
@@ -402,9 +425,16 @@ async function viewRecipe(id) {
       return openAsk(`Instead of ${amount ? `${amount} ` : ""}${ing.name}, can I use `);
     }
     if (e.target.closest("[data-add]")) {
+      const onList = listStatus(ing);
+      if (onList && !onList.checked) {
+        const amount = [formatQty(onList.quantity), onList.unit].filter(Boolean).join(" ");
+        return toast(`${ing.name} is already on your list${amount ? ` (${amount})` : ""}`);
+      }
       await api("/api/shopping", { method: "POST", body: { items: [toShoppingItem(ing)] } });
       toast(`Added ${ing.name}`);
       refreshShoppingBadge();
+      await loadListed();
+      renderDrawer();
     }
   });
   drawer.addEventListener("change", async (e) => {
