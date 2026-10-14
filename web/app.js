@@ -2,7 +2,8 @@
 // Everything runs on the phone: data in IndexedDB, AI calls straight to Claude with your own key.
 import { api, withStores, exportBackup, importBackup } from "./localapi.js";
 import { getMeta, setMeta, requestPersistence } from "./store.js";
-import { MODELS, extractFromUrl, extractFromImages, extractFromText, testKey, askAboutRecipe } from "./ai.js";
+import { MODELS, extractFromUrl, extractFromImages, extractFromText, testKey, askAboutRecipe, providerLabel } from "./ai.js";
+import { testGeminiKey } from "./gemini.js";
 import { parseRecipeText, parseQty } from "./parse.js";
 
 const app = document.getElementById("app");
@@ -279,9 +280,9 @@ async function viewRecipe(id) {
 
     <aside class="drawer" id="drawer" aria-label="Ingredients"></aside>
     <div class="drawer-backdrop" id="backdrop"></div>
-    <button class="btn primary fab fab-ask" id="ask">💬 Ask Claude</button>
+    <button class="btn primary fab fab-ask" id="ask">💬 Ask AI</button>
     <div class="drawer-backdrop" id="ask-backdrop"></div>
-    <section class="sheet" id="ask-sheet" aria-label="Ask Claude about this recipe">
+    <section class="sheet" id="ask-sheet" aria-label="Ask AI about this recipe">
       <div class="drawer-head"><h2>Ask about this recipe</h2><button class="iconbtn" id="close-ask" aria-label="Close">${icon.close}</button></div>
       <div class="sheet-body" id="ask-body"></div>
     </section>`;
@@ -430,14 +431,15 @@ async function viewRecipe(id) {
     sheet.classList.add("open");
     askBackdrop.classList.add("open");
     document.body.style.overflow = "hidden";
-    const hasKey = Boolean(await getMeta("apiKey", ""));
-    askBody.innerHTML = hasKey
+    const cfg = await aiConfig();
+    const who = isFree(cfg) ? "Gemini" : "Claude";
+    askBody.innerHTML = cfg.ready
       ? `<form id="ask-form">
           <textarea class="input" name="q" rows="3" placeholder="e.g. Can I use jarred minced garlic instead of cloves?">${esc(prefill)}</textarea>
           <button class="btn primary" style="width:100%;margin-top:10px">Ask</button>
-          <p class="muted" style="font-size:13px;text-align:center;margin:8px 0 0">Claude answers, and suggests exact edits if a swap works. Nothing changes until you tap Apply. About 0.1¢.</p>
+          <p class="muted" style="font-size:13px;text-align:center;margin:8px 0 0">${who} answers, and suggests exact edits if a swap works. Nothing changes until you tap Apply. ${isFree(cfg) ? "Free." : "About 0.1¢."}</p>
         </form>`
-      : `<p>Asking Claude needs your API key. <a href="#/settings">Add it in Settings</a>.</p>`;
+      : `<p>This needs a free Gemini key (or a Claude key). <a href="#/settings">Add one in Settings</a>.</p>`;
     const ta = askBody.querySelector("textarea");
     if (ta) {
       ta.focus();
@@ -493,7 +495,7 @@ async function viewRecipe(id) {
           <button class="btn" id="ask-again">Ask something else</button>
         </div>`
       : `<button class="btn" style="width:100%" id="ask-again">Ask something else</button>`}
-      <p class="muted" style="font-size:12px;text-align:center;margin:10px 0 0">${esc(res.model)} · about ${formatCost(res.cost)}</p>`;
+      <p class="muted" style="font-size:12px;text-align:center;margin:10px 0 0">${esc(res.model)} · ${res.cost === 0 ? "free" : `about ${formatCost(res.cost)}`}</p>`;
     askBody.querySelector("#ask-again").addEventListener("click", () => openAsk());
     askBody.querySelector("#apply")?.addEventListener("click", async () => {
       const before = {
@@ -515,9 +517,9 @@ async function viewRecipe(id) {
     const q = new FormData(e.target).get("q").trim();
     if (!q) return;
     lastQuestion = q;
-    askBody.innerHTML = `<div class="working"><div class="spinner"></div><strong>Asking Claude…</strong></div>`;
+    askBody.innerHTML = `<div class="working"><div class="spinner"></div><strong>Thinking…</strong></div>`;
     try {
-      const res = await askAboutRecipe(await getMeta("apiKey", ""), recipe, q);
+      const res = await askAboutRecipe(await aiConfig(), recipe, q);
       await addSpend(res.cost);
       showAnswer(res);
     } catch (err) {
@@ -599,9 +601,21 @@ setInterval(() => {
   renderTimers();
 }, 1000);
 
+// ---------- AI provider ----------
+// Gemini is the free default; Claude is the paid option. Claude keys live under "apiKey" (the original name).
+async function aiConfig() {
+  const geminiKey = await getMeta("geminiKey", "");
+  const claudeKey = await getMeta("apiKey", "");
+  const provider = await getMeta("aiProvider", claudeKey && !geminiKey ? "claude" : "gemini");
+  return { provider, geminiKey, claudeKey, ready: Boolean(provider === "gemini" ? geminiKey : claudeKey) };
+}
+
+const isFree = (cfg) => cfg.provider === "gemini";
+
 // ---------- import ----------
 function formatCost(dollars) {
   if (dollars == null) return "";
+  if (dollars === 0) return "free";
   const cents = dollars * 100;
   if (cents < 0.05) return "under 0.1¢";
   if (cents < 1) return `${cents.toFixed(1)}¢`;
@@ -616,9 +630,9 @@ async function addSpend(cost) {
 
 // Runs an AI import and stores the result as a draft for the review screen.
 async function runAI(kind, payload, tier = "cheap") {
-  const apiKey = await getMeta("apiKey", "");
+  const cfg = await aiConfig();
   const extractor = { url: extractFromUrl, photo: extractFromImages, text: extractFromText }[kind];
-  const { recipe, cost, model } = await extractor(apiKey, tier, payload);
+  const { recipe, cost, model } = await extractor(cfg, tier, payload);
   await addSpend(cost);
   const { imageUrl, ...rest } = recipe;
   state.draft = await withStores({
@@ -626,7 +640,7 @@ async function runAI(kind, payload, tier = "cheap") {
     image: kind === "url" && /^https?:\/\//.test(imageUrl) ? imageUrl : null,
     source: kind === "url" ? payload : kind === "photo" ? "Photo import" : "Pasted text",
   });
-  state.lastImport = { kind, payload, tier, cost, model };
+  state.lastImport = { kind, payload, tier, cost, model, provider: cfg.provider };
 }
 
 async function runFreeParse(text) {
@@ -652,7 +666,9 @@ async function takeSharedPayload() {
 
 async function viewImport(query = "") {
   document.title = "Import recipe";
-  const hasKey = Boolean(await getMeta("apiKey", ""));
+  const cfg = await aiConfig();
+  const hasKey = cfg.ready;
+  const who = isFree(cfg) ? "Gemini" : "Claude";
   let tab = "url";
   let photos = [];
   let prefill = { url: "", text: "" };
@@ -685,8 +701,8 @@ async function viewImport(query = "") {
   app.innerHTML = `
     <a class="btn ghost small" href="#/">${icon.back} Recipes</a>
     <h1 style="margin-top:12px">Import a recipe</h1>
-    <p class="muted" style="margin:0">Claude pulls out the ingredients, steps and timings. You review everything before saving.</p>
-    ${hasKey ? "" : `<div class="notice">AI import needs your Anthropic API key. <a href="#/settings">Add it in Settings</a>. Until then you can use <b>Quick parse</b> on pasted text for free, or <a href="#/new">type a recipe in</a>.</div>`}
+    <p class="muted" style="margin:0">${who} pulls out the ingredients, steps and timings. You review everything before saving.</p>
+    ${hasKey ? "" : `<div class="notice">AI import needs a free Gemini key (or a Claude key). <a href="#/settings">Add one in Settings</a>; it takes a couple of minutes. Until then you can use <b>Quick parse</b> on pasted text, or <a href="#/new">type a recipe in</a>.</div>`}
     <div class="tabs" role="tablist">
       <button data-tab="url">🔗 Link</button>
       <button data-tab="photo">📷 Photo</button>
@@ -709,7 +725,7 @@ async function viewImport(query = "") {
       panel.innerHTML = `${err}<form id="f">
         <label class="field">Recipe webpage link<input class="input" name="url" type="url" inputmode="url" placeholder="https://…" value="${esc(prefill.url)}" required></label>
         <button class="btn primary" style="width:100%" ${hasKey ? "" : "disabled"}>Import from link</button></form>
-        ${costNote("Usually under 1¢ with Claude Haiku")}`;
+        ${costNote(isFree(cfg) ? "Free with Gemini" : "Usually under 1¢ with Claude Haiku")}`;
     } else if (tab === "photo") {
       panel.innerHTML = `${err}
         <label class="dropzone" id="drop">
@@ -720,15 +736,15 @@ async function viewImport(query = "") {
         </label>
         <div class="thumbs">${photos.map((p, i) => `<div class="t"><img src="${p.preview}" alt=""><button data-rm="${i}" aria-label="Remove">×</button></div>`).join("")}</div>
         <button class="btn primary" style="width:100%;margin-top:12px" id="go" ${photos.length && hasKey ? "" : "disabled"}>Read ${photos.length || ""} photo${photos.length === 1 ? "" : "s"}</button>
-        ${costNote("About 0.1–0.5¢ per photo with Claude Haiku")}`;
+        ${costNote(isFree(cfg) ? "Free with Gemini" : "About 0.1–0.5¢ per photo with Claude Haiku")}`;
     } else {
       panel.innerHTML = `${err}<form id="f">
         <label class="field">Paste the recipe<textarea class="input" name="text" rows="12" placeholder="Paste a recipe from an email, a note, a social post…" required>${esc(prefill.text)}</textarea></label>
         <div class="row">
-          <button class="btn primary" style="flex:1" name="mode" value="ai" ${hasKey ? "" : "disabled"}>Read with Claude</button>
+          <button class="btn primary" style="flex:1" name="mode" value="ai" ${hasKey ? "" : "disabled"}>Read with ${who}</button>
           <button class="btn" style="flex:1" name="mode" value="free">Quick parse (free)</button>
         </div></form>
-        ${costNote("Claude: about 0.1¢ · Quick parse: free, works offline, less accurate")}`;
+        ${costNote(isFree(cfg) ? "Both free · Quick parse works offline but is less accurate" : "Claude: about 0.1¢ · Quick parse: free, works offline, less accurate")}`;
     }
   }
   setTab(tab);
@@ -806,9 +822,58 @@ window.addEventListener("beforeinstallprompt", (e) => {
   installPrompt = e;
 });
 
+function keyCard({ id, title, value, placeholder, where, help }) {
+  return `<h2>${title}</h2>
+    <div class="card panel">
+      <p style="margin-top:0">${value ? "✅ Key saved." : "No key yet."} It's stored only on this phone and sent only to ${where}.</p>
+      <form id="${id}-form">
+        <label class="field">API key
+          <input class="input" name="key" type="password" autocomplete="off" spellcheck="false" placeholder="${placeholder}" value="${esc(value)}">
+        </label>
+        <div class="key-msg"></div>
+        <div class="row">
+          <button class="btn primary">Save &amp; test</button>
+          <button type="button" class="btn ghost" data-show>Show</button>
+          ${value ? `<span class="spacer"></span><button type="button" class="btn danger" data-remove>Remove</button>` : ""}
+        </div>
+      </form>
+      <details style="margin-top:12px"><summary>How do I get a key?</summary><ol style="padding-left:20px">${help}</ol></details>
+    </div>`;
+}
+
+function wireKeyCard(id, metaKey, tester) {
+  const form = app.querySelector(`#${id}-form`);
+  const input = form.querySelector("[name=key]");
+  form.querySelector("[data-show]").addEventListener("click", (e) => {
+    input.type = input.type === "password" ? "text" : "password";
+    e.target.textContent = input.type === "password" ? "Show" : "Hide";
+  });
+  form.addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const key = input.value.trim();
+    const msg = form.querySelector(".key-msg");
+    if (!key) return;
+    msg.innerHTML = `<p class="muted">Checking key…</p>`;
+    const problem = await tester(key);
+    if (problem) {
+      msg.innerHTML = `<div class="error">${esc(problem)}</div>`;
+      return;
+    }
+    await setMeta(metaKey, key);
+    await setMeta("aiProvider", id); // a freshly added key becomes the one in use
+    toast("Key saved and working.");
+    viewSettings();
+  });
+  form.querySelector("[data-remove]")?.addEventListener("click", async () => {
+    if (!confirm("Remove this API key from this phone?")) return;
+    await setMeta(metaKey, "");
+    viewSettings();
+  });
+}
+
 async function viewSettings() {
   document.title = "Settings";
-  const apiKey = await getMeta("apiKey", "");
+  const cfg = await aiConfig();
   const spend = await getMeta("spend", { total: 0, count: 0 });
   const lastBackup = await getMeta("lastBackup", null);
   const persisted = await navigator.storage?.persisted?.().catch(() => false);
@@ -825,34 +890,37 @@ async function viewSettings() {
       ${installPrompt ? `<button class="btn primary" id="install">Install app</button>` : `<p class="muted" style="margin-bottom:0">In Chrome, tap the <b>⋮</b> menu → <b>Add to Home screen</b> → <b>Install</b>.</p>`}
     </div>`}
 
-    <h2>Claude API key</h2>
+    <h2>AI</h2>
     <div class="card panel">
-      <p style="margin-top:0">${apiKey ? "✅ AI import is on." : "AI import is off until you add a key."} Your key is stored only on this phone and is sent only to Anthropic.</p>
-      <form id="key-form">
-        <label class="field">API key
-          <input class="input" name="key" type="password" autocomplete="off" spellcheck="false" placeholder="sk-ant-…" value="${esc(apiKey)}">
-        </label>
-        <div id="key-msg"></div>
-        <div class="row">
-          <button class="btn primary">Save &amp; test</button>
-          <button type="button" class="btn ghost" id="show-key">Show</button>
-          ${apiKey ? `<span class="spacer"></span><button type="button" class="btn danger" id="rm-key">Remove</button>` : ""}
-        </div>
-      </form>
-      <details style="margin-top:12px"><summary>How do I get a key?</summary>
-        <ol style="padding-left:20px">
-          <li>Go to <a href="https://console.anthropic.com/settings/keys" target="_blank" rel="noopener">console.anthropic.com</a> and sign up.</li>
-          <li>Add a little credit under <b>Billing</b>. $5 lasts a long time at under 1¢ per import.</li>
-          <li>Under <b>Billing → Limits</b>, set a monthly spend limit so a mistake can never cost much.</li>
-          <li>Under <b>API keys</b>, tap <b>Create key</b>, copy it, and paste it above.</li>
-        </ol>
-      </details>
+      <p style="margin-top:0">Which AI reads recipes and answers your questions:</p>
+      <label class="choice"><input type="radio" name="provider" value="gemini" ${cfg.provider === "gemini" ? "checked" : ""}>
+        <span><b>Gemini (free)</b><br><span class="muted">Google's free tier. Daily limits, but plenty for personal use. Google may use what you send to improve its products.</span></span></label>
+      <label class="choice"><input type="radio" name="provider" value="claude" ${cfg.provider === "claude" ? "checked" : ""}>
+        <span><b>Claude (paid)</b><br><span class="muted">Usually under 1¢ per import, billed to your Anthropic account.</span></span></label>
     </div>
 
-    <h2>AI spending</h2>
+    ${keyCard({
+      id: "gemini", title: "Gemini API key (free)", value: cfg.geminiKey, placeholder: "AIza…",
+      where: "Google",
+      help: `<li>Go to <a href="https://aistudio.google.com/apikey" target="_blank" rel="noopener">aistudio.google.com/apikey</a> and sign in with your Google account.</li>
+        <li>Tap <b>Create API key</b>. If it asks for a project, let it create one.</li>
+        <li>Copy the key and paste it above.</li>
+        <li>No card needed. If Google ever offers to set up billing, you can skip it; that's what keeps it free.</li>`,
+    })}
+
+    ${keyCard({
+      id: "claude", title: "Claude API key (paid, optional)", value: cfg.claudeKey, placeholder: "sk-ant-…",
+      where: "Anthropic",
+      help: `<li>Go to <a href="https://console.anthropic.com/settings/keys" target="_blank" rel="noopener">console.anthropic.com</a> and sign up.</li>
+        <li>Add a little credit under <b>Billing</b>. $5 lasts a long time at under 1¢ per import.</li>
+        <li>Under <b>Billing → Limits</b>, set a monthly spend limit so a mistake can never cost much.</li>
+        <li>Under <b>API keys</b>, tap <b>Create key</b>, copy it, and paste it above.</li>`,
+    })}
+
+    <h2>AI usage</h2>
     <div class="card panel">
-      <p style="margin:0">${spend.count} AI import${spend.count === 1 ? "" : "s"} · about <b>${spend.total ? formatCost(spend.total) : "0¢"}</b> total</p>
-      <p class="muted" style="font-size:13px">Estimated on this phone. Your real bill is at console.anthropic.com. Normal imports use ${MODELS.cheap.label}; “Try harder” uses ${MODELS.strong.label}.</p>
+      <p style="margin:0">${spend.count} AI request${spend.count === 1 ? "" : "s"} · Claude spending about <b>${spend.total ? formatCost(spend.total) : "0¢"}</b></p>
+      <p class="muted" style="font-size:13px">Gemini requests are free. Claude spending is estimated on this phone; your real bill is at console.anthropic.com.</p>
       <button class="btn small" id="reset-spend">Reset counter</button>
     </div>
 
@@ -879,31 +947,16 @@ async function viewSettings() {
     viewSettings();
   });
 
-  const keyInput = app.querySelector("[name=key]");
-  app.querySelector("#show-key").addEventListener("click", (e) => {
-    keyInput.type = keyInput.type === "password" ? "text" : "password";
-    e.target.textContent = keyInput.type === "password" ? "Show" : "Hide";
-  });
-  app.querySelector("#key-form").addEventListener("submit", async (e) => {
-    e.preventDefault();
-    const key = keyInput.value.trim();
-    const msg = app.querySelector("#key-msg");
-    if (!key) return;
-    msg.innerHTML = `<p class="muted">Checking key…</p>`;
-    const problem = await testKey(key);
-    if (problem) {
-      msg.innerHTML = `<div class="error">${esc(problem)}</div>`;
-      return;
-    }
-    await setMeta("apiKey", key);
-    toast("Key saved. AI import is on.");
-    viewSettings();
-  });
-  app.querySelector("#rm-key")?.addEventListener("click", async () => {
-    if (!confirm("Remove your API key from this phone?")) return;
-    await setMeta("apiKey", "");
-    viewSettings();
-  });
+  app.querySelectorAll("[name=provider]").forEach((radio) =>
+    radio.addEventListener("change", async () => {
+      await setMeta("aiProvider", radio.value);
+      toast(radio.value === "gemini" ? "Using Gemini (free)" : "Using Claude");
+      viewSettings();
+    }));
+
+  wireKeyCard("gemini", "geminiKey", testGeminiKey);
+  wireKeyCard("claude", "apiKey", testKey);
+
   app.querySelector("#reset-spend").addEventListener("click", async () => {
     await setMeta("spend", { total: 0, count: 0 });
     viewSettings();
@@ -948,12 +1001,14 @@ function draftBanner() {
   if (!li) return "";
   let retry = "";
   if (li.kind === "free") {
-    retry = `<button type="button" class="btn small" id="retry">Read it with Claude instead (~0.1¢)</button>`;
+    retry = `<button type="button" class="btn small" id="retry">Read it with AI instead</button>`;
   } else if (li.tier === "cheap") {
-    retry = `<button type="button" class="btn small" id="retry">Not right? Try harder with ${MODELS.strong.label} (~5–10¢)</button>`;
+    retry = li.provider === "gemini"
+      ? `<button type="button" class="btn small" id="retry">Not right? Try harder (free)</button>`
+      : `<button type="button" class="btn small" id="retry">Not right? Try harder with ${MODELS.strong.label} (~5–10¢)</button>`;
   }
-  const how = li.kind === "free" ? "Parsed for free" : `Read by ${li.model} · about ${formatCost(li.cost)}`;
-  return `<div class="notice"><div>Here's what ${li.kind === "free" ? "the quick parser" : "Claude"} found. Fix anything that's off, then save.</div>
+  const how = li.kind === "free" ? "Parsed for free" : `Read by ${li.model} · ${li.cost === 0 ? "free" : `about ${formatCost(li.cost)}`}`;
+  return `<div class="notice"><div>Here's what ${li.kind === "free" ? "the quick parser" : li.provider === "gemini" ? "Gemini" : "Claude"} found. Fix anything that's off, then save.</div>
     <div class="muted" style="font-size:13px;margin:4px 0 8px">${how}</div>${retry}</div>`;
 }
 

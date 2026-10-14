@@ -4,16 +4,21 @@ A recipe book that lives on your Android phone. Claude reads recipes from links,
 pages, handwritten cards, screenshots) or pasted text and turns them into ingredients, steps and timers.
 
 There's no server and nothing to keep running. The app files are hosted for free on GitHub Pages.
-Your recipes are stored on the phone, and AI imports go straight from the phone to Claude using your
-own API key.
+Your recipes are stored on the phone, and AI requests go straight from the phone to the AI you pick
+in Settings, using your own key:
+
+- **Gemini (free, default)**: Google's free tier, `gemini-3.8-flash`. Get a key at aistudio.google.com/apikey.
+- **Claude (paid)**: Claude Haiku 5.5 for imports and questions, Opus 5.5 for "Try harder".
 
 ## Using it
 
 - **Import**: tap *Import* and choose Link, Photo or Text, or use *Share → Recipe Book* from Chrome
   or your gallery. You review everything before saving.
-  - Normal imports use Claude Haiku 5.5 and cost well under 1¢.
-  - *Try harder* re-reads one import with Claude Opus 5.5 (about 5–10¢).
+  - With Gemini everything is free; *Try harder* re-reads with more thinking.
+  - With Claude, imports cost well under 1¢ and *Try harder* uses Opus (about 5–10¢).
   - *Quick parse* on pasted text is free and works offline.
+- **Ask AI** (on every recipe, or ⇄ next to an ingredient): ask about substitutions or technique;
+  if a swap works it proposes exact edits, which you can apply and undo.
 - **Cooking**: tap steps to mark them done. Step timers beep, and the screen stays awake.
 - **Ingredients** (top-right button): scale servings, tick what you have, pick where to buy each item
   (remembered next time), and add items to the shopping list.
@@ -38,6 +43,7 @@ copies update.
 
 - `web/app.js`: screens
 - `web/localapi.js`: data operations on the phone (IndexedDB via `web/store.js`)
-- `web/ai.js`: Claude calls. This is the single place to swap in a server later if the app grows beyond one user.
+- `web/ai.js`: AI calls (prompts, schemas, Claude). This is the single place to swap in a server later if the app grows beyond one user.
+- `web/gemini.js`: the Gemini provider
 - `web/parse.js`: the free text parser
 - `web/vendor/anthropic-sdk.js`: bundled Anthropic SDK (`npm run build:sdk` to rebuild)

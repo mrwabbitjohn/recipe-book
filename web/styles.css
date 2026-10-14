@@ -278,3 +278,5 @@ details summary { cursor: pointer; }
 .chg .new { font-weight: 600; }
 .ing-actions { display: flex; gap: 2px; }
 .ing-actions [data-swap] { font-size: 18px; font-weight: 700; }
+.choice { display: flex; gap: 10px; align-items: flex-start; padding: 10px 0; border-top: 1px solid var(--border); cursor: pointer; }
+.choice input { width: 20px; height: 20px; margin-top: 2px; accent-color: var(--accent); flex: none; }

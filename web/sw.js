@@ -1,10 +1,10 @@
 // Service worker: makes the app work offline and receives things shared from Android's share menu.
 // Bump VERSION when you deploy changes so phones pick up the new files.
-const VERSION = "v3";
+const VERSION = "v4";
 const APP_CACHE = `recipe-book-${VERSION}`;
 const APP_FILES = [
   "./", "index.html", "styles.css", "app.js", "store.js", "localapi.js", "ai.js", "parse.js",
-  "vendor/anthropic-sdk.js", "manifest.webmanifest",
+  "gemini.js", "vendor/anthropic-sdk.js", "manifest.webmanifest",
   "icons/icon.svg", "icons/icon-192.png", "icons/icon-512.png",
 ];
 

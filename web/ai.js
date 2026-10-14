@@ -1,6 +1,7 @@
 // Claude-powered recipe extraction, called straight from the phone with the user's own API key.
 // All AI calls go through extract(); a server-side proxy could replace it later without touching the UI.
 import Anthropic from "./vendor/anthropic-sdk.js";
+import { geminiStructured, GEMINI_MODEL } from "./gemini.js";
 
 export const MODELS = {
   cheap: { id: "claude-haiku-5-5", label: "Claude Haiku 5.5", inPerM: 0.1, outPerM: 0.5 },
@@ -100,8 +101,20 @@ async function callClaude(client, tier, params) {
   return client.messages.create(params); // Haiku has no server-side fallback
 }
 
-// One structured-output call to Claude (resuming web fetch pauses), with friendly errors.
-async function callStructured({ apiKey, tier, system, schema, content, webFetch = false, effort }) {
+// The provider to use and its key, as chosen in Settings: { provider: "gemini" | "claude", geminiKey, claudeKey }.
+export const providerLabel = (cfg, tier = "cheap") =>
+  cfg.provider === "gemini" ? GEMINI_MODEL.label : MODELS[tier].label;
+
+// One structured-output call (Gemini or Claude), with friendly errors.
+async function callStructured({ cfg, tier, system, schema, content, webFetch = false, effort }) {
+  if (cfg.provider === "gemini") {
+    // Gemini's free tier has one model; "try harder" just thinks harder.
+    return geminiStructured({
+      apiKey: cfg.geminiKey, system, schema, content, webFetch,
+      thinking: tier === "strong" ? "high" : "low",
+    });
+  }
+  const apiKey = cfg.claudeKey;
   if (!apiKey) throw new ImportError("Add your Anthropic API key in Settings to use AI features.");
   const model = MODELS[tier];
   const client = new Anthropic({ apiKey, dangerouslyAllowBrowser: true, maxRetries: 2 });
@@ -174,9 +187,9 @@ async function callStructured({ apiKey, tier, system, schema, content, webFetch 
   return { data, cost, model: model.label };
 }
 
-async function extract({ apiKey, tier, content, webFetch = false, notFound }) {
+async function extract({ cfg, tier, content, webFetch = false, notFound }) {
   const { data: recipe, cost, model } = await callStructured({
-    apiKey, tier, system: SYSTEM, schema: RECIPE_SCHEMA, content, webFetch,
+    cfg, tier, system: SYSTEM, schema: RECIPE_SCHEMA, content, webFetch,
   });
   if (!recipe.found) {
     throw new ImportError(notFound || "Couldn't find a recipe in that. Try a different page, photo, or paste the text.");
@@ -185,9 +198,9 @@ async function extract({ apiKey, tier, content, webFetch = false, notFound }) {
   return { recipe, cost, model };
 }
 
-export function extractFromUrl(apiKey, tier, url) {
+export function extractFromUrl(cfg, tier, url) {
   return extract({
-    apiKey,
+    cfg,
     tier,
     webFetch: true,
     content: [{ type: "text", text: `Fetch this recipe page and extract the recipe: ${url}` }],
@@ -195,9 +208,9 @@ export function extractFromUrl(apiKey, tier, url) {
   });
 }
 
-export function extractFromImages(apiKey, tier, images) {
+export function extractFromImages(cfg, tier, images) {
   return extract({
-    apiKey,
+    cfg,
     tier,
     content: [
       ...images.map(({ mediaType, data }) => ({ type: "image", source: { type: "base64", media_type: mediaType, data } })),
@@ -206,9 +219,9 @@ export function extractFromImages(apiKey, tier, images) {
   });
 }
 
-export function extractFromText(apiKey, tier, text) {
+export function extractFromText(cfg, tier, text) {
   return extract({
-    apiKey,
+    cfg,
     tier,
     content: [{ type: "text", text: `${text}\n\nExtract the recipe from the text above.` }],
   });
@@ -278,9 +291,9 @@ function recipeAsText(r) {
   return `Recipe: ${r.title}${r.servings ? ` (serves ${r.servings})` : ""}\n\nIngredients:\n${ings}\n\nSteps:\n${steps}${r.notes ? `\n\nNotes:\n${r.notes}` : ""}`;
 }
 
-export async function askAboutRecipe(apiKey, recipe, question) {
+export async function askAboutRecipe(cfg, recipe, question) {
   const { data, cost, model } = await callStructured({
-    apiKey,
+    cfg,
     tier: "cheap",
     effort: "medium",
     system: ASK_SYSTEM,
