@@ -1018,6 +1018,8 @@ async function viewSettings() {
   document.title = "Settings";
   const cfg = await aiConfig();
   const spend = await getMeta("spend", { total: 0, count: 0 });
+  const photoStatus = await getMeta("photoStatus", null);
+  const missingPhotos = (await api("/api/recipes")).filter((r) => !r.image && !r.photoSearched).length;
   const lastBackup = await getMeta("lastBackup", null);
   const persisted = await navigator.storage?.persisted?.().catch(() => false);
   const est = await navigator.storage?.estimate?.().catch(() => null);
@@ -1042,6 +1044,8 @@ async function viewSettings() {
         <span><b>Claude (paid)</b><br><span class="muted">Usually under 1¢ per import, billed to your Anthropic account.</span></span></label>
     </div>
 
+    <div class="row" style="margin:-4px 0 4px"><button class="btn small" id="test-ai">Test AI</button><span id="test-ai-msg" class="muted" style="font-size:13px;flex:1"></span></div>
+
     ${keyCard({
       id: "gemini", title: "Gemini API key (free)", value: cfg.geminiKey, placeholder: "AIza…",
       where: "Google",
@@ -1059,6 +1063,14 @@ async function viewSettings() {
         <li>Under <b>Billing → Limits</b>, set a monthly spend limit so a mistake can never cost much.</li>
         <li>Under <b>API keys</b>, tap <b>Create key</b>, copy it, and paste it above.</li>`,
     })}
+
+    <h2>Photos</h2>
+    <div class="card panel">
+      <p style="margin-top:0">${missingPhotos ? `${missingPhotos} recipe${missingPhotos === 1 ? "" : "s"} still need${missingPhotos === 1 ? "s" : ""} a photo.` : "Every recipe has a photo (or you chose none)."}</p>
+      ${photoStatus ? `<p class="muted" style="font-size:13px">Last run ${new Date(photoStatus.at).toLocaleString()}: ${photoStatus.found} added${photoStatus.failed ? `, ${photoStatus.failed} failed` : ""}.</p>
+        ${photoStatus.error ? `<div class="error" style="font-size:13px">${esc(photoStatus.error)}</div>` : ""}` : ""}
+      <button class="btn small" id="find-photos" ${missingPhotos ? "" : "disabled"}>${fillingPhotos ? "Finding photos…" : "Find photos now"}</button>
+    </div>
 
     <h2>AI usage</h2>
     <div class="card panel">
@@ -1096,6 +1108,24 @@ async function viewSettings() {
       toast(radio.value === "gemini" ? "Using Gemini (free)" : "Using Claude");
       viewSettings();
     }));
+
+  app.querySelector("#find-photos").addEventListener("click", (e) => {
+    e.target.disabled = true;
+    e.target.textContent = "Finding photos…";
+    fillMissingPhotos({ manual: true });
+  });
+
+  // Runs one tiny real request with the selected AI and shows exactly what happened.
+  app.querySelector("#test-ai").addEventListener("click", async () => {
+    const msg = app.querySelector("#test-ai-msg");
+    msg.textContent = "Testing…";
+    try {
+      const res = await photoQueries({ ...cfg, geminiKey: cfg.provider === "gemini" ? cfg.geminiKey : "" }, { title: "Spaghetti Bolognese", ingredientNames: ["beef mince", "tomatoes"] });
+      msg.textContent = `✅ ${cfg.provider === "gemini" ? "Gemini" : "Claude"} works (replied: ${res.queries.join(", ")})`;
+    } catch (err) {
+      msg.textContent = `❌ ${err.message}`;
+    }
+  });
 
   wireKeyCard("gemini", "geminiKey", testGeminiKey);
   wireKeyCard("claude", "apiKey", testKey);
@@ -1517,56 +1547,92 @@ async function viewShopping() {
 // ---------- automatic photos for recipes without one ----------
 let fillingPhotos = false;
 
-async function autoPhoto(recipe) {
+// AI steps are optional: if the AI fails, fall back to the title search and the best-scoring photo.
+async function autoPhoto(recipe, notes) {
   const cfg = await aiConfig();
   const hasAI = Boolean(cfg.geminiKey || cfg.claudeKey);
   let queries = queriesFromTitle(recipe.title);
   if (hasAI) {
-    const res = await photoQueries(cfg, recipe);
-    if (res.cost) await addSpend(res.cost);
-    if (res.queries.length) queries = res.queries;
+    try {
+      const res = await photoQueries(cfg, recipe);
+      if (res.cost) await addSpend(res.cost);
+      if (res.queries.length) queries = res.queries;
+    } catch (err) {
+      notes.aiError = err.message;
+    }
   }
   const candidates = await findPhotos(queries, { limit: 8 });
   if (!candidates.length) return null;
   let choice = candidates[0];
-  if (hasAI) {
-    const previews = await previewsFor(candidates);
-    if (!previews.length) return null;
-    const res = await pickPhoto(cfg, recipe, previews);
-    if (res.cost) await addSpend(res.cost);
-    choice = res.index == null ? null : previews[res.index].candidate;
+  if (hasAI && !notes.aiError) {
+    try {
+      const previews = await previewsFor(candidates);
+      if (previews.length) {
+        const res = await pickPhoto(cfg, recipe, previews);
+        if (res.cost) await addSpend(res.cost);
+        choice = res.index == null ? null : previews[res.index].candidate;
+      }
+    } catch (err) {
+      notes.aiError = err.message;
+    }
   }
   if (!choice) return null;
   const { url } = await api("/api/images", { method: "POST", body: { blob: await downloadPhoto(choice) } });
   return { url, credit: choice.credit };
 }
 
-// Quietly finds photos for recipes that don't have one. Stops on any error (offline, AI limit)
-// and tries again next time, without marking those recipes as done.
-async function fillMissingPhotos() {
-  if (fillingPhotos || !navigator.onLine) return;
+// Finds photos for recipes that don't have one, showing progress. A problem with one recipe
+// skips it (and it's retried next time); losing the connection stops the run.
+async function fillMissingPhotos({ manual = false } = {}) {
+  if (fillingPhotos) return;
+  if (!navigator.onLine) {
+    if (manual) toast("You're offline. Photos need an internet connection.");
+    return;
+  }
+  const todo = (await api("/api/recipes")).filter((r) => !r.image && !r.photoSearched);
+  if (!todo.length) {
+    if (manual) toast("Every recipe already has a photo.");
+    return;
+  }
   fillingPhotos = true;
+  const notes = {};
   let found = 0;
+  let failed = 0;
+  let lastError = "";
   try {
-    const todo = (await api("/api/recipes")).filter((r) => !r.image && !r.photoSearched);
-    for (const r of todo) {
-      const photo = await autoPhoto(r);
-      await api(`/api/recipes/${r.id}`, {
-        method: "PUT",
-        body: photo ? { image: photo.url, imageCredit: photo.credit, photoSearched: true } : { photoSearched: true },
-      });
-      if (photo) {
-        found++;
-        const thumb = document.querySelector(`a.rcard[href="#/recipe/${r.id}"] .thumb`);
-        if (thumb) thumb.outerHTML = `<div class="thumb"><img src="${esc(photo.url)}" alt="" loading="lazy"></div>`;
+    for (const [n, r] of todo.entries()) {
+      toast(`Finding photos ${n + 1}/${todo.length}…`);
+      try {
+        const photo = await autoPhoto(r, notes);
+        // No photo while the AI was failing: leave it unmarked so it's retried once the AI works.
+        if (photo || !notes.aiError) {
+          await api(`/api/recipes/${r.id}`, {
+            method: "PUT",
+            body: photo ? { image: photo.url, imageCredit: photo.credit, photoSearched: true } : { photoSearched: true },
+          });
+        }
+        if (photo) {
+          found++;
+          const thumb = document.querySelector(`a.rcard[href="#/recipe/${r.id}"] .thumb`);
+          if (thumb) thumb.outerHTML = `<div class="thumb"><img src="${esc(photo.url)}" alt="" loading="lazy"></div>`;
+        }
+      } catch (err) {
+        failed++;
+        lastError = err.message;
+        if (!navigator.onLine || err instanceof TypeError) break; // network gone
       }
     }
-  } catch (err) {
-    console.warn("Photo search stopped:", err.message);
   } finally {
     fillingPhotos = false;
   }
-  if (found) toast(`Added photos to ${found} recipe${found === 1 ? "" : "s"}`);
+  await setMeta("photoStatus", {
+    at: new Date().toISOString(), found, failed,
+    error: lastError || (notes.aiError ? `AI step skipped: ${notes.aiError}` : ""),
+  });
+  if (found || failed) {
+    toast(found ? `Added photos to ${found} recipe${found === 1 ? "" : "s"}${failed ? ` (${failed} failed, see Settings)` : ""}` : "Couldn't add photos. See Settings → Photos.");
+  }
+  if (location.hash === "#/settings") viewSettings();
 }
 
 // ---------- boot ----------
