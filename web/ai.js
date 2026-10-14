@@ -325,6 +325,56 @@ export async function askAboutRecipe(cfg, recipe, question) {
   return { ...data, cost, model };
 }
 
+// ---------- finding a cover photo ----------
+// Uses Gemini when there's a key (free), even if Claude is the chosen provider.
+const photoCfg = (cfg) => (cfg.geminiKey ? { ...cfg, provider: "gemini" } : cfg);
+
+const QUERY_SCHEMA = {
+  type: "object",
+  additionalProperties: false,
+  required: ["queries"],
+  properties: { queries: { type: "array", items: { type: "string" } } },
+};
+
+export async function photoQueries(cfg, recipe) {
+  const { data, cost } = await callStructured({
+    cfg: photoCfg(cfg),
+    tier: "cheap",
+    system: "You write photo-library search phrases for dishes. Return 3 short phrases (1-3 words each), most specific first, using the dish's common name as people would tag a food photo (e.g. 'pad kra pao', 'thai basil pork', 'basil stir fry'). For sauces, dips, marinades or drinks, search for the thing itself. English, lowercase, no brand names.",
+    schema: QUERY_SCHEMA,
+    content: [{ type: "text", text: `Dish: ${recipe.title}\n${recipe.description || ""}\nMain ingredients: ${(recipe.ingredientNames || recipe.ingredients?.map((i) => i.name) || []).slice(0, 8).join(", ")}` }],
+  });
+  return { queries: data.queries.filter((q) => typeof q === "string" && q.trim()).slice(0, 3), cost };
+}
+
+const PICK_SCHEMA = {
+  type: "object",
+  additionalProperties: false,
+  required: ["photo"],
+  properties: {
+    photo: { ...nullable("integer"), description: "Number of the best photo, or null if none clearly shows this dish" },
+  },
+};
+
+// thumbs: [{ mediaType, data }] small previews, in candidate order.
+export async function pickPhoto(cfg, recipe, thumbs) {
+  const content = [];
+  thumbs.forEach((t, n) => {
+    content.push({ type: "text", text: `Photo ${n + 1}:` });
+    content.push({ type: "image", source: { type: "base64", media_type: t.mediaType, data: t.data } });
+  });
+  content.push({ type: "text", text: `Which photo best shows "${recipe.title}" as a finished dish, appetising and clearly that food? Prefer close-ups of the food over menus, people or packaging. Answer null if none really fits.` });
+  const { data, cost } = await callStructured({
+    cfg: photoCfg(cfg),
+    tier: "cheap",
+    system: "You choose cover photos for recipes in a personal recipe app.",
+    schema: PICK_SCHEMA,
+    content,
+  });
+  const n = data.photo;
+  return { index: Number.isInteger(n) && n >= 1 && n <= thumbs.length ? n - 1 : null, cost };
+}
+
 // Cheap call used by Settings to check that a key works.
 export async function testKey(apiKey) {
   const client = new Anthropic({ apiKey, dangerouslyAllowBrowser: true, maxRetries: 0 });

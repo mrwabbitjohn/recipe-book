@@ -2,7 +2,8 @@
 // Everything runs on the phone: data in IndexedDB, AI calls straight to Claude with your own key.
 import { api, withStores, exportBackup, importBackup } from "./localapi.js";
 import { getMeta, setMeta, requestPersistence } from "./store.js";
-import { MODELS, extractFromUrl, extractFromImages, extractFromText, extractFromVideo, testKey, askAboutRecipe, providerLabel } from "./ai.js";
+import { MODELS, extractFromUrl, extractFromImages, extractFromText, extractFromVideo, testKey, askAboutRecipe, providerLabel, photoQueries, pickPhoto } from "./ai.js";
+import { findPhotos, downloadPhoto, previewsFor, queriesFromTitle } from "./photos.js";
 import { testGeminiKey } from "./gemini.js";
 import { parseRecipeText, parseQty } from "./parse.js";
 
@@ -260,8 +261,12 @@ async function viewRecipe(id) {
         </div>
         ${recipe.tags.length ? `<div class="row">${recipe.tags.map((tg) => `<span class="chip">${esc(tg)}</span>`).join("")}</div>` : ""}
         ${recipe.source ? `<p class="source">From ${sourceLink}</p>` : ""}
+        ${recipe.image ? "" : `<button class="btn small" id="change-photo">📷 Find a photo</button>`}
       </div>
-      ${recipe.image ? `<div class="hero"><img src="${esc(recipe.image)}" alt=""></div>` : ""}
+      ${recipe.image ? `<div>
+        <div class="hero"><img src="${esc(recipe.image)}" alt=""></div>
+        <div class="photo-meta"><span>${esc(recipe.imageCredit || "")}</span><button class="linkbtn" id="change-photo">Change photo</button></div>
+      </div>` : ""}
     </div>
 
     <h2>Steps</h2>
@@ -282,6 +287,11 @@ async function viewRecipe(id) {
     <div class="drawer-backdrop" id="backdrop"></div>
     <button class="btn primary fab fab-ask" id="ask">💬 Ask AI</button>
     <div class="drawer-backdrop" id="ask-backdrop"></div>
+    <div class="drawer-backdrop" id="photo-backdrop"></div>
+    <section class="sheet" id="photo-sheet" aria-label="Choose a photo">
+      <div class="drawer-head"><h2>Choose a photo</h2><button class="iconbtn" id="close-photo" aria-label="Close">${icon.close}</button></div>
+      <div class="sheet-body" id="photo-body"></div>
+    </section>
     <section class="sheet" id="ask-sheet" aria-label="Ask AI about this recipe">
       <div class="drawer-head"><h2>Ask about this recipe</h2><button class="iconbtn" id="close-ask" aria-label="Close">${icon.close}</button></div>
       <div class="sheet-body" id="ask-body"></div>
@@ -531,6 +541,74 @@ async function viewRecipe(id) {
   app.querySelector("#ask").addEventListener("click", () => openAsk());
   app.querySelector("#close-ask").addEventListener("click", closeAsk);
   askBackdrop.addEventListener("click", closeAsk);
+
+  // ---------- photo picker ----------
+  const photoSheet = app.querySelector("#photo-sheet");
+  const photoBody = app.querySelector("#photo-body");
+  const photoBackdrop = app.querySelector("#photo-backdrop");
+  const closePhoto = () => {
+    photoSheet.classList.remove("open");
+    photoBackdrop.classList.remove("open");
+    document.body.style.overflow = "";
+  };
+  async function setPhoto(blob, credit) {
+    const { url } = await api("/api/images", { method: "POST", body: { blob } });
+    await api(`/api/recipes/${id}`, { method: "PUT", body: { image: url, imageCredit: credit, photoSearched: true } });
+    closePhoto();
+    viewRecipe(id);
+  }
+  async function openPhotoPicker() {
+    photoSheet.classList.add("open");
+    photoBackdrop.classList.add("open");
+    document.body.style.overflow = "hidden";
+    photoBody.innerHTML = `<div class="working"><div class="spinner"></div><strong>Finding photos…</strong></div>`;
+    let candidates = [];
+    try {
+      const cfg = await aiConfig();
+      let queries = queriesFromTitle(recipe.title);
+      if (cfg.geminiKey || cfg.claudeKey) {
+        try {
+          const res = await photoQueries(cfg, recipe);
+          if (res.cost) await addSpend(res.cost);
+          if (res.queries.length) queries = res.queries;
+        } catch {}
+      }
+      candidates = await findPhotos(queries, { limit: 12 });
+    } catch {}
+    photoBody.innerHTML = `
+      ${candidates.length
+        ? `<p class="muted" style="margin:0 0 8px;font-size:13px">Free, openly licensed photos. Tap one to use it.</p>
+           <div class="photo-grid">${candidates.map((c, n) => `<button class="pick" data-n="${n}" title="${esc(c.title)}"><img src="${esc(c.thumb)}" alt="${esc(c.title)}" loading="lazy"></button>`).join("")}</div>`
+        : `<p>No photos found${navigator.onLine ? "" : " (you're offline)"}. You can use your own instead.</p>`}
+      <div class="row" style="margin-top:12px">
+        <label class="btn" style="flex:1">Use my own photo<input type="file" id="own-photo" accept="image/*" hidden></label>
+        ${recipe.image ? `<button class="btn ghost danger" id="rm-photo">Remove photo</button>` : ""}
+      </div>`;
+    photoBody.querySelectorAll(".pick").forEach((b) => b.addEventListener("click", async () => {
+      const c = candidates[Number(b.dataset.n)];
+      photoBody.querySelectorAll(".pick").forEach((x) => (x.disabled = true));
+      b.classList.add("loading");
+      try {
+        await setPhoto(await downloadPhoto(c), c.credit);
+      } catch (err) {
+        toast(err.message);
+        photoBody.querySelectorAll(".pick").forEach((x) => (x.disabled = false));
+        b.classList.remove("loading");
+      }
+    }));
+    photoBody.querySelector("#own-photo").addEventListener("change", async (e) => {
+      const file = e.target.files[0];
+      if (file) await setPhoto((await resizeImage(file, 1400)).blob, "");
+    });
+    photoBody.querySelector("#rm-photo")?.addEventListener("click", async () => {
+      await api(`/api/recipes/${id}`, { method: "PUT", body: { image: null, photoSearched: true } });
+      closePhoto();
+      viewRecipe(id);
+    });
+  }
+  app.querySelector("#change-photo").addEventListener("click", openPhotoPicker);
+  app.querySelector("#close-photo").addEventListener("click", closePhoto);
+  photoBackdrop.addEventListener("click", closePhoto);
 
   app.querySelector("#undo")?.addEventListener("click", async () => {
     await api(`/api/recipes/${id}`, { method: "PUT", body: state.undo.before });
@@ -1227,11 +1305,13 @@ async function viewEditor(id) {
     const img = await resizeImage(file, 1400);
     const { url } = await api("/api/images", { method: "POST", body: { blob: img.blob } });
     recipe.image = url;
+    recipe.imageCredit = "";
     app.querySelector("#cover-prev").innerHTML = `<img src="${url}" alt="">`;
     app.querySelector("#cover-rm").hidden = false;
   });
   app.querySelector("#cover-rm").addEventListener("click", () => {
     recipe.image = null;
+    recipe.photoSearched = true;
     app.querySelector("#cover-prev").innerHTML = "";
     app.querySelector("#cover-rm").hidden = true;
   });
@@ -1273,6 +1353,7 @@ async function viewEditor(id) {
       state.draft = null;
       state.lastImport = null;
       toast("Saved");
+      if (!saved.image && !saved.photoSearched) setTimeout(fillMissingPhotos, 500);
       location.hash = `#/recipe/${saved.id}`;
     } catch (err) {
       toast(err.message);
@@ -1433,6 +1514,61 @@ async function viewShopping() {
   }
 }
 
+// ---------- automatic photos for recipes without one ----------
+let fillingPhotos = false;
+
+async function autoPhoto(recipe) {
+  const cfg = await aiConfig();
+  const hasAI = Boolean(cfg.geminiKey || cfg.claudeKey);
+  let queries = queriesFromTitle(recipe.title);
+  if (hasAI) {
+    const res = await photoQueries(cfg, recipe);
+    if (res.cost) await addSpend(res.cost);
+    if (res.queries.length) queries = res.queries;
+  }
+  const candidates = await findPhotos(queries, { limit: 8 });
+  if (!candidates.length) return null;
+  let choice = candidates[0];
+  if (hasAI) {
+    const previews = await previewsFor(candidates);
+    if (!previews.length) return null;
+    const res = await pickPhoto(cfg, recipe, previews);
+    if (res.cost) await addSpend(res.cost);
+    choice = res.index == null ? null : previews[res.index].candidate;
+  }
+  if (!choice) return null;
+  const { url } = await api("/api/images", { method: "POST", body: { blob: await downloadPhoto(choice) } });
+  return { url, credit: choice.credit };
+}
+
+// Quietly finds photos for recipes that don't have one. Stops on any error (offline, AI limit)
+// and tries again next time, without marking those recipes as done.
+async function fillMissingPhotos() {
+  if (fillingPhotos || !navigator.onLine) return;
+  fillingPhotos = true;
+  let found = 0;
+  try {
+    const todo = (await api("/api/recipes")).filter((r) => !r.image && !r.photoSearched);
+    for (const r of todo) {
+      const photo = await autoPhoto(r);
+      await api(`/api/recipes/${r.id}`, {
+        method: "PUT",
+        body: photo ? { image: photo.url, imageCredit: photo.credit, photoSearched: true } : { photoSearched: true },
+      });
+      if (photo) {
+        found++;
+        const thumb = document.querySelector(`a.rcard[href="#/recipe/${r.id}"] .thumb`);
+        if (thumb) thumb.outerHTML = `<div class="thumb"><img src="${esc(photo.url)}" alt="" loading="lazy"></div>`;
+      }
+    }
+  } catch (err) {
+    console.warn("Photo search stopped:", err.message);
+  } finally {
+    fillingPhotos = false;
+  }
+  if (found) toast(`Added photos to ${found} recipe${found === 1 ? "" : "s"}`);
+}
+
 // ---------- boot ----------
 async function boot() {
   if ("serviceWorker" in navigator) navigator.serviceWorker.register("./sw.js").catch(() => {});
@@ -1443,5 +1579,6 @@ async function boot() {
   refreshShoppingBadge();
   window.addEventListener("hashchange", router);
   router();
+  setTimeout(fillMissingPhotos, 1500);
 }
 boot();

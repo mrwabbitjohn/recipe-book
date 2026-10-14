@@ -283,3 +283,13 @@ details summary { cursor: pointer; }
 .video-prev { width: 100%; max-height: 320px; border-radius: 12px; background: #000; display: block; }
 .erow .input.est { border-style: dashed; border-color: var(--accent); }
 .est-tag { grid-column: 1 / -1; font-size: 12px; color: var(--accent); margin-top: -2px; }
+
+/* ---------- photos ---------- */
+.photo-meta { display: flex; gap: 8px; align-items: baseline; justify-content: space-between; font-size: 12px; color: var(--muted); margin-top: 6px; }
+.photo-meta span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.linkbtn { background: none; border: 0; padding: 4px 0; color: var(--accent); font-weight: 600; font-size: 13px; cursor: pointer; white-space: nowrap; }
+.photo-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 6px; }
+.photo-grid .pick { padding: 0; border: 2px solid transparent; border-radius: 10px; overflow: hidden; aspect-ratio: 1; background: var(--surface-2); cursor: pointer; }
+.photo-grid .pick img { width: 100%; height: 100%; object-fit: cover; }
+.photo-grid .pick.loading { border-color: var(--accent); opacity: .6; }
+#photo-backdrop { z-index: 45; }

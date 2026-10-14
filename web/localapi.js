@@ -60,6 +60,8 @@ function cleanRecipe(input, existing = {}) {
     title: String(input.title || "Untitled recipe").trim(),
     description: String(input.description || ""),
     image: input.image || null,
+    imageCredit: input.image ? String(input.imageCredit || "") : "",
+    photoSearched: Boolean(input.photoSearched ?? existing.photoSearched), // don't auto-search again
     source: input.source || null,
     servings: num(input.servings),
     prepMinutes: num(input.prepMinutes),

@@ -22,6 +22,9 @@ in Settings, using your own key:
   - *Quick parse* on pasted text is free and works offline.
 - **Ask AI** (on every recipe, or ⇄ next to an ingredient): ask about substitutions or technique;
   if a swap works it proposes exact edits, which you can apply and undo.
+- **Photos**: recipes without a photo get one automatically: the AI writes search phrases, free openly
+  licensed photos come from Openverse, and the AI picks the one that best shows the dish. Use
+  *Change photo* on a recipe to pick another or use your own.
 - **Cooking**: tap steps to mark them done. Step timers beep, and the screen stays awake.
 - **Ingredients** (top-right button): scale servings, tick what you have, pick where to buy each item
   (remembered next time), and add items to the shopping list.
@@ -48,5 +51,6 @@ copies update.
 - `web/localapi.js`: data operations on the phone (IndexedDB via `web/store.js`)
 - `web/ai.js`: AI calls (prompts, schemas, Claude). This is the single place to swap in a server later if the app grows beyond one user.
 - `web/gemini.js`: the Gemini provider
+- `web/photos.js`: photo search (Openverse) and download
 - `web/parse.js`: the free text parser
 - `web/vendor/anthropic-sdk.js`: bundled Anthropic SDK (`npm run build:sdk` to rebuild)
