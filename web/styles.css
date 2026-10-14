@@ -259,3 +259,22 @@ button.chip.active { background: var(--accent-soft); color: var(--accent); borde
 .notice { background: var(--accent-soft); border: 1px solid color-mix(in srgb, var(--accent) 35%, transparent); padding: 12px 14px; border-radius: 12px; margin: 12px 0; }
 .notice a { color: var(--accent); font-weight: 600; }
 details summary { cursor: pointer; }
+
+/* ---------- ask Claude sheet ---------- */
+.fab-ask { display: inline-flex; }
+.sheet {
+  position: fixed; left: 0; right: 0; bottom: 0; z-index: 46; max-height: 88vh; overflow-y: auto;
+  background: var(--bg); border-top: 1px solid var(--border); border-radius: 18px 18px 0 0; box-shadow: var(--shadow);
+  transform: translateY(100%); transition: transform .22s ease;
+  padding-bottom: env(safe-area-inset-bottom);
+}
+@media (min-width: 760px) { .sheet { left: 50%; right: auto; width: 560px; margin-left: -280px; } }
+.sheet.open { transform: none; }
+#ask-backdrop { z-index: 45; }
+.sheet-body { padding: 14px 16px 18px; }
+.chg-list { overflow: hidden; }
+.chg { display: flex; flex-direction: column; gap: 2px; padding: 10px 12px; border-top: 1px solid var(--border); font-size: 15px; }
+.chg .old { color: var(--muted); text-decoration: line-through; }
+.chg .new { font-weight: 600; }
+.ing-actions { display: flex; gap: 2px; }
+.ing-actions [data-swap] { font-size: 18px; font-weight: 700; }

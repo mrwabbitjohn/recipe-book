@@ -100,8 +100,9 @@ async function callClaude(client, tier, params) {
   return client.messages.create(params); // Haiku has no server-side fallback
 }
 
-async function extract({ apiKey, tier, content, webFetch = false, notFound }) {
-  if (!apiKey) throw new ImportError("Add your Anthropic API key in Settings to use AI import.");
+// One structured-output call to Claude (resuming web fetch pauses), with friendly errors.
+async function callStructured({ apiKey, tier, system, schema, content, webFetch = false, effort }) {
+  if (!apiKey) throw new ImportError("Add your Anthropic API key in Settings to use AI features.");
   const model = MODELS[tier];
   const client = new Anthropic({ apiKey, dangerouslyAllowBrowser: true, maxRetries: 2 });
   const messages = [{ role: "user", content }];
@@ -115,10 +116,10 @@ async function extract({ apiKey, tier, content, webFetch = false, notFound }) {
       const params = {
         model: model.id,
         max_tokens: 16000,
-        system: SYSTEM,
+        system,
         output_config: {
-          effort: tier === "strong" ? "medium" : "low",
-          format: { type: "json_schema", schema: RECIPE_SCHEMA },
+          effort: effort || (tier === "strong" ? "medium" : "low"),
+          format: { type: "json_schema", schema },
         },
         messages,
         ...(webFetch ? { tools: [webFetchTool(toolTypes[0])] } : {}),
@@ -157,24 +158,31 @@ async function extract({ apiKey, tier, content, webFetch = false, notFound }) {
   }
 
   if (response.stop_reason === "refusal") throw new ImportError("Claude declined to process this input.");
-  if (response.stop_reason === "max_tokens") throw new ImportError("That recipe was too long to finish reading.");
+  if (response.stop_reason === "max_tokens") throw new ImportError("Claude's answer was cut off. Please try again.");
   if (response.stop_reason === "pause_turn") {
     throw new ImportError("Reading that page took too long. Try a screenshot or paste the text instead.");
   }
 
   // With tools in play there can be several text blocks; the structured JSON is the last one.
   const text = response.content.filter((b) => b.type === "text").at(-1)?.text;
-  let recipe;
+  let data;
   try {
-    recipe = JSON.parse(text);
+    data = JSON.parse(text);
   } catch {
     throw new ImportError("Claude's answer couldn't be read. Please try again.");
   }
+  return { data, cost, model: model.label };
+}
+
+async function extract({ apiKey, tier, content, webFetch = false, notFound }) {
+  const { data: recipe, cost, model } = await callStructured({
+    apiKey, tier, system: SYSTEM, schema: RECIPE_SCHEMA, content, webFetch,
+  });
   if (!recipe.found) {
     throw new ImportError(notFound || "Couldn't find a recipe in that. Try a different page, photo, or paste the text.");
   }
   delete recipe.found;
-  return { recipe, cost, model: model.label };
+  return { recipe, cost, model };
 }
 
 export function extractFromUrl(apiKey, tier, url) {
@@ -204,6 +212,82 @@ export function extractFromText(apiKey, tier, text) {
     tier,
     content: [{ type: "text", text: `${text}\n\nExtract the recipe from the text above.` }],
   });
+}
+
+// ---------- questions about a saved recipe (substitutions, swaps, tweaks) ----------
+const AISLE_ENUM = RECIPE_SCHEMA.properties.ingredients.items.properties.aisle.enum;
+
+const ASK_SCHEMA = {
+  type: "object",
+  additionalProperties: false,
+  required: ["answer", "ingredientChanges", "stepChanges", "noteToAdd"],
+  properties: {
+    answer: { type: "string", description: "Plain-language answer, 1-4 short sentences" },
+    ingredientChanges: {
+      type: "array",
+      items: {
+        type: "object",
+        additionalProperties: false,
+        required: ["action", "number", "quantity", "unit", "name", "note", "aisle"],
+        properties: {
+          action: { type: "string", enum: ["replace", "add", "remove"] },
+          number: { ...nullable("integer"), description: "Ingredient number from the list; null for add" },
+          quantity: nullable("number"),
+          unit: { type: "string" },
+          name: { type: "string" },
+          note: { type: "string" },
+          aisle: { type: "string", enum: AISLE_ENUM },
+        },
+      },
+    },
+    stepChanges: {
+      type: "array",
+      items: {
+        type: "object",
+        additionalProperties: false,
+        required: ["number", "text", "timerMinutes"],
+        properties: {
+          number: { type: "integer", description: "Step number from the list" },
+          text: { type: "string", description: "The full new text of that step" },
+          timerMinutes: nullable("number"),
+        },
+      },
+    },
+    noteToAdd: { type: "string", description: "Short tip to add to the recipe notes, or ''" },
+  },
+};
+
+const ASK_SYSTEM = `You are the cooking helper inside a personal recipe app. The user asks about one of their saved recipes: usually whether they can swap an ingredient, but also technique, equipment or timing questions.
+
+- Answer briefly and practically, like a friend who cooks a lot. Plain language, no headings.
+- If they want to swap or change something and it's a reasonable alternative, propose exact edits:
+  - Convert amounts sensibly (e.g. 1 garlic clove ≈ 1 tsp jarred minced garlic; 1 tbsp fresh herbs ≈ 1 tsp dried).
+  - Update every step whose wording or technique depends on the change (e.g. you don't pound jarred garlic; it burns faster, so add it later). Give the full new text for each changed step, keeping the "Title: text" style if the step uses it. Keep or adjust its timer.
+  - Use "replace" to swap an ingredient in place, "add"/"remove" only when needed.
+- If it's a poor substitute, say why, suggest a better option, and propose no edits.
+- For questions that don't change the recipe, propose no edits. Never touch unrelated ingredients or steps.
+- Keep units short (tsp, tbsp, cup, g, kg, ml, l, clove, can).`;
+
+function recipeAsText(r) {
+  const ings = r.ingredients
+    .map((i, n) => `${n + 1}. ${[i.quantity, i.unit, i.name].filter((x) => x !== null && x !== "").join(" ")}${i.note ? ` (${i.note})` : ""}`)
+    .join("\n");
+  const steps = r.steps
+    .map((s, n) => `${n + 1}. ${s.text}${s.timerMinutes ? ` [timer: ${s.timerMinutes} min]` : ""}`)
+    .join("\n");
+  return `Recipe: ${r.title}${r.servings ? ` (serves ${r.servings})` : ""}\n\nIngredients:\n${ings}\n\nSteps:\n${steps}${r.notes ? `\n\nNotes:\n${r.notes}` : ""}`;
+}
+
+export async function askAboutRecipe(apiKey, recipe, question) {
+  const { data, cost, model } = await callStructured({
+    apiKey,
+    tier: "cheap",
+    effort: "medium",
+    system: ASK_SYSTEM,
+    schema: ASK_SCHEMA,
+    content: [{ type: "text", text: `${recipeAsText(recipe)}\n\nMy question: ${question}` }],
+  });
+  return { ...data, cost, model };
 }
 
 // Cheap call used by Settings to check that a key works.

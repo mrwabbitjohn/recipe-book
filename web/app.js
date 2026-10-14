@@ -2,13 +2,14 @@
 // Everything runs on the phone: data in IndexedDB, AI calls straight to Claude with your own key.
 import { api, withStores, exportBackup, importBackup } from "./localapi.js";
 import { getMeta, setMeta, requestPersistence } from "./store.js";
-import { MODELS, extractFromUrl, extractFromImages, extractFromText, testKey } from "./ai.js";
+import { MODELS, extractFromUrl, extractFromImages, extractFromText, testKey, askAboutRecipe } from "./ai.js";
 import { parseRecipeText, parseQty } from "./parse.js";
 
 const app = document.getElementById("app");
 const state = {
   stores: [],
   draft: null, // recipe produced by an import, waiting for review
+  undo: null, // { id, before, summary } after applying a Claude-suggested change
   lastImport: null, // { kind, payload, tier, cost, model } so "Try harder" can re-run it
   timers: new Map(), // "recipeId:stepIndex" -> { end, minutes, done }
   cook: new Map(), // recipeId -> { servings, doneSteps:Set, have:Set }
@@ -40,9 +41,12 @@ function formatQty(q) {
 
 function formatMinutes(m) {
   if (!m) return "";
+  if (m < 1) return `${Math.max(5, Math.round((m * 60) / 5) * 5)} sec`;
   const h = Math.floor(m / 60);
-  const min = Math.round(m % 60);
-  return h ? `${h} hr${min ? ` ${min} min` : ""}` : `${min} min`;
+  const min = Math.floor(m % 60);
+  const sec = Math.round(((m * 60) % 60) / 5) * 5;
+  if (h) return `${h} hr${min ? ` ${min} min` : ""}`;
+  return sec && sec < 60 ? `${min} min ${sec} sec` : `${Math.round(m)} min`;
 }
 
 // A stable colour per recipe for cards without a photo.
@@ -242,6 +246,7 @@ async function viewRecipe(id) {
       <a class="btn small" href="#/edit/${id}">Edit</a>
       <button class="btn primary small ing-toggle" id="open-ing">${icon.list} Ingredients <span>(${recipe.ingredients.length})</span></button>
     </div>
+    ${state.undo?.id === id ? `<div class="notice row" id="undo-bar"><span style="flex:1">Recipe updated: ${esc(state.undo.summary)}</span><button class="btn small" id="undo">Undo</button></div>` : ""}
     <div class="rhead ${recipe.image ? "has-img" : ""}">
       <div>
         <h1>${esc(recipe.title)}</h1>
@@ -273,7 +278,13 @@ async function viewRecipe(id) {
     ${recipe.notes ? `<h2>Notes</h2><div class="notes">${esc(recipe.notes)}</div>` : ""}
 
     <aside class="drawer" id="drawer" aria-label="Ingredients"></aside>
-    <div class="drawer-backdrop" id="backdrop"></div>`;
+    <div class="drawer-backdrop" id="backdrop"></div>
+    <button class="btn primary fab fab-ask" id="ask">💬 Ask Claude</button>
+    <div class="drawer-backdrop" id="ask-backdrop"></div>
+    <section class="sheet" id="ask-sheet" aria-label="Ask Claude about this recipe">
+      <div class="drawer-head"><h2>Ask about this recipe</h2><button class="iconbtn" id="close-ask" aria-label="Close">${icon.close}</button></div>
+      <div class="sheet-body" id="ask-body"></div>
+    </section>`;
 
   // steps & timers
   app.querySelector("#steps").addEventListener("click", (e) => {
@@ -327,7 +338,10 @@ async function viewRecipe(id) {
           <div class="txt">${qty ? `<span class="qty">${esc(qty)}</span> ` : ""}${esc(ing.name)}${ing.note ? ` <span class="note">${esc(ing.note)}</span>` : ""}</div>
           <div class="store-pick">${storeSelect(ing.store, "data-store")}</div>
         </div>
-        <button class="iconbtn" data-add title="Add to shopping list">${icon.cart}</button>
+        <div class="ing-actions">
+          <button class="iconbtn" data-swap title="Ask about a substitute" aria-label="Ask about a substitute for ${esc(ing.name)}">⇄</button>
+          <button class="iconbtn" data-add title="Add to shopping list" aria-label="Add ${esc(ing.name)} to shopping list">${icon.cart}</button>
+        </div>
       </div>`;
     }).join("");
     const need = recipe.ingredients.filter((i) => !cook.have.has(i.id)).length;
@@ -371,6 +385,11 @@ async function viewRecipe(id) {
     const row = e.target.closest(".ing");
     if (!row) return;
     const ing = recipe.ingredients.find((i) => i.id === row.dataset.id);
+    if (e.target.closest("[data-swap]")) {
+      close();
+      const amount = [formatQty(ing.quantity), ing.unit].filter(Boolean).join(" ");
+      return openAsk(`Instead of ${amount ? `${amount} ` : ""}${ing.name}, can I use `);
+    }
     if (e.target.closest("[data-add]")) {
       await api("/api/shopping", { method: "POST", body: { items: [toShoppingItem(ing)] } });
       toast(`Added ${ing.name}`);
@@ -393,6 +412,129 @@ async function viewRecipe(id) {
       renderDrawer();
       if (store) toast(`Remembered: buy ${ing.name} at ${store}`);
     }
+  });
+
+  // ---------- ask Claude (substitutions and other questions) ----------
+  const sheet = app.querySelector("#ask-sheet");
+  const askBody = app.querySelector("#ask-body");
+  const askBackdrop = app.querySelector("#ask-backdrop");
+  let lastQuestion = "";
+
+  function closeAsk() {
+    sheet.classList.remove("open");
+    askBackdrop.classList.remove("open");
+    document.body.style.overflow = "";
+  }
+
+  async function openAsk(prefill = "") {
+    sheet.classList.add("open");
+    askBackdrop.classList.add("open");
+    document.body.style.overflow = "hidden";
+    const hasKey = Boolean(await getMeta("apiKey", ""));
+    askBody.innerHTML = hasKey
+      ? `<form id="ask-form">
+          <textarea class="input" name="q" rows="3" placeholder="e.g. Can I use jarred minced garlic instead of cloves?">${esc(prefill)}</textarea>
+          <button class="btn primary" style="width:100%;margin-top:10px">Ask</button>
+          <p class="muted" style="font-size:13px;text-align:center;margin:8px 0 0">Claude answers, and suggests exact edits if a swap works. Nothing changes until you tap Apply. About 0.1¢.</p>
+        </form>`
+      : `<p>Asking Claude needs your API key. <a href="#/settings">Add it in Settings</a>.</p>`;
+    const ta = askBody.querySelector("textarea");
+    if (ta) {
+      ta.focus();
+      ta.setSelectionRange(ta.value.length, ta.value.length);
+    }
+  }
+
+  const ingLine = (i) => [formatQty(i.quantity), i.unit, i.name].filter(Boolean).join(" ") + (i.note ? ` (${i.note})` : "");
+
+  function describeChanges(res) {
+    const rows = [];
+    for (const c of res.ingredientChanges) {
+      const old = recipe.ingredients[c.number - 1];
+      if (c.action === "replace" && old) rows.push(`<div class="chg"><span class="old">${esc(ingLine(old))}</span><span class="new">→ ${esc(ingLine(c))}</span></div>`);
+      else if (c.action === "remove" && old) rows.push(`<div class="chg"><span class="old">Remove: ${esc(ingLine(old))}</span></div>`);
+      else if (c.action === "add") rows.push(`<div class="chg"><span class="new">Add: ${esc(ingLine(c))}</span></div>`);
+    }
+    for (const c of res.stepChanges) {
+      if (recipe.steps[c.number - 1]) rows.push(`<div class="chg"><span class="muted">Step ${c.number}</span><span class="new">${esc(c.text)}</span></div>`);
+    }
+    if (res.noteToAdd) rows.push(`<div class="chg"><span class="muted">Add to notes</span><span class="new">${esc(res.noteToAdd)}</span></div>`);
+    return rows;
+  }
+
+  // Turns Claude's proposed edits into a new ingredients/steps/notes set.
+  function applyChanges(res) {
+    const ingredients = recipe.ingredients.map(({ store, ...i }) => ({ ...i }));
+    const removals = [];
+    for (const c of res.ingredientChanges) {
+      const n = c.number - 1;
+      const fresh = { quantity: c.quantity, unit: c.unit, name: c.name, note: c.note, aisle: c.aisle };
+      if (c.action === "replace" && ingredients[n]) ingredients[n] = { ...ingredients[n], ...fresh };
+      else if (c.action === "remove" && ingredients[n]) removals.push(n);
+      else if (c.action === "add") ingredients.push({ section: ingredients.at(-1)?.section || "", ...fresh });
+    }
+    removals.sort((a, b) => b - a).forEach((n) => ingredients.splice(n, 1));
+    const steps = recipe.steps.map((st) => ({ ...st }));
+    for (const c of res.stepChanges) {
+      if (steps[c.number - 1]) steps[c.number - 1] = { text: c.text, timerMinutes: c.timerMinutes };
+    }
+    const notes = res.noteToAdd ? [recipe.notes, res.noteToAdd].filter(Boolean).join("\n\n") : recipe.notes;
+    return { ingredients, steps, notes };
+  }
+
+  function showAnswer(res) {
+    const rows = describeChanges(res);
+    askBody.innerHTML = `
+      <p class="muted" style="font-size:13px;margin:0 0 4px">You asked: ${esc(lastQuestion)}</p>
+      <p style="margin:0 0 12px">${esc(res.answer)}</p>
+      ${rows.length ? `<div class="card chg-list"><div class="muted" style="font-size:12px;font-weight:700;text-transform:uppercase;letter-spacing:.04em;padding:8px 12px 0">Suggested changes</div>${rows.join("")}</div>
+        <div class="row" style="margin-top:12px">
+          <button class="btn primary" style="flex:1" id="apply">Apply to recipe</button>
+          <button class="btn" id="ask-again">Ask something else</button>
+        </div>`
+      : `<button class="btn" style="width:100%" id="ask-again">Ask something else</button>`}
+      <p class="muted" style="font-size:12px;text-align:center;margin:10px 0 0">${esc(res.model)} · about ${formatCost(res.cost)}</p>`;
+    askBody.querySelector("#ask-again").addEventListener("click", () => openAsk());
+    askBody.querySelector("#apply")?.addEventListener("click", async () => {
+      const before = {
+        ingredients: recipe.ingredients.map(({ store, ...i }) => i),
+        steps: recipe.steps,
+        notes: recipe.notes,
+      };
+      const firstChange = res.ingredientChanges[0];
+      const summary = firstChange?.action === "replace" ? `now uses ${firstChange.name}` : "changes applied";
+      await api(`/api/recipes/${id}`, { method: "PUT", body: applyChanges(res) });
+      state.undo = { id, before, summary };
+      closeAsk();
+      viewRecipe(id);
+    });
+  }
+
+  askBody.addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const q = new FormData(e.target).get("q").trim();
+    if (!q) return;
+    lastQuestion = q;
+    askBody.innerHTML = `<div class="working"><div class="spinner"></div><strong>Asking Claude…</strong></div>`;
+    try {
+      const res = await askAboutRecipe(await getMeta("apiKey", ""), recipe, q);
+      await addSpend(res.cost);
+      showAnswer(res);
+    } catch (err) {
+      askBody.innerHTML = `<div class="error">${esc(err.message)}</div><button class="btn" style="width:100%" id="ask-again">Try again</button>`;
+      askBody.querySelector("#ask-again").addEventListener("click", () => openAsk(q));
+    }
+  });
+
+  app.querySelector("#ask").addEventListener("click", () => openAsk());
+  app.querySelector("#close-ask").addEventListener("click", closeAsk);
+  askBackdrop.addEventListener("click", closeAsk);
+
+  app.querySelector("#undo")?.addEventListener("click", async () => {
+    await api(`/api/recipes/${id}`, { method: "PUT", body: state.undo.before });
+    state.undo = null;
+    toast("Change undone");
+    viewRecipe(id);
   });
 }
 
