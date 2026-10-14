@@ -107,6 +107,7 @@ h2 { font-size: 20px; margin: 24px 0 10px; }
 .chip {
   display: inline-flex; align-items: center; gap: 4px; padding: 3px 10px; border-radius: 999px;
   background: var(--surface-2); font-size: 13px; color: var(--muted); border: 1px solid transparent;
+  white-space: nowrap; flex: none;
 }
 button.chip { cursor: pointer; }
 button.chip.active { background: var(--accent-soft); color: var(--accent); border-color: var(--accent); }
@@ -125,6 +126,9 @@ button.chip.active { background: var(--accent-soft); color: var(--accent); borde
 .rcard .thumb { aspect-ratio: 4/3; background: var(--surface-2); display: grid; place-items: center; color: var(--muted); overflow: hidden; }
 .rcard .thumb img { width: 100%; height: 100%; object-fit: cover; }
 .rcard .thumb .ph { font-size: 44px; font-weight: 800; opacity: .35; }
+.rcard .thumb.noimg { aspect-ratio: auto; height: 64px; background: hsl(var(--hue) 55% 88%); color: hsl(var(--hue) 45% 30%); }
+.rcard .thumb.noimg .ph { font-size: 28px; opacity: .6; }
+@media (prefers-color-scheme: dark) { .rcard .thumb.noimg { background: hsl(var(--hue) 30% 22%); color: hsl(var(--hue) 50% 75%); } }
 .rcard .body { padding: 12px 14px 14px; }
 .rcard h3 { margin: 0 0 4px; font-size: 17px; line-height: 1.3; }
 .rcard .meta { font-size: 13px; color: var(--muted); display: flex; gap: 10px; flex-wrap: wrap; }

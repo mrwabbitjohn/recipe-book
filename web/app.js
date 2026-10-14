@@ -45,6 +45,9 @@ function formatMinutes(m) {
   return h ? `${h} hr${min ? ` ${min} min` : ""}` : `${min} min`;
 }
 
+// A stable colour per recipe for cards without a photo.
+const hueFor = (text) => [...String(text)].reduce((h, c) => (h * 31 + c.charCodeAt(0)) % 360, 7);
+
 const totalTime = (r) => r.totalMinutes || (r.prepMinutes || 0) + (r.cookMinutes || 0) || null;
 
 const icon = {
@@ -194,7 +197,9 @@ async function viewList() {
     grid.innerHTML = `<div class="grid">${shown.map((r) => {
       const t = totalTime(r);
       return `<a class="card rcard" href="#/recipe/${r.id}">
-        <div class="thumb">${r.image ? `<img src="${esc(r.image)}" alt="" loading="lazy">` : `<span class="ph">${esc(r.title[0] || "?")}</span>`}</div>
+        ${r.image
+          ? `<div class="thumb"><img src="${esc(r.image)}" alt="" loading="lazy"></div>`
+          : `<div class="thumb noimg" style="--hue:${hueFor(r.title)}"><span class="ph">${esc(r.title[0] || "?")}</span></div>`}
         <div class="body">
           <h3>${r.favorite ? '<span class="fav">★</span> ' : ""}${esc(r.title)}</h3>
           <div class="meta">${t ? `<span>${formatMinutes(t)}</span>` : ""}<span>${r.ingredientCount} ingredients</span>${r.servings ? `<span>Serves ${r.servings}</span>` : ""}</div>

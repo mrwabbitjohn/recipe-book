@@ -27,14 +27,17 @@ const UNITS = {
   sprig: /^sprigs?$/i, handful: /^handfuls?$/i, piece: /^pieces?$/i,
 };
 
+// Order matters: the first match wins ("chicken stock" is Pantry, "frozen peas" is Frozen).
 const AISLES = [
-  ["Meat & Seafood", /\b(chicken|beef|pork|lamb|turkey|bacon|sausage|ham|steak|mince|fish|salmon|tuna|shrimp|prawns?|cod)\b/i],
-  ["Dairy & Eggs", /\b(milk|cream|butter|cheese|yogh?urt|eggs?|parmesan|mozzarella|cheddar|ricotta|sour cream)\b/i],
-  ["Spices", /\b(salt|pepper|cumin|paprika|cinnamon|oregano|thyme|chili powder|curry powder|nutmeg|turmeric|spice|seasoning|bay lea)/i],
-  ["Produce", /\b(onions?|garlic|tomato(es)?|potato(es)?|carrots?|celery|lettuce|spinach|peppers?|lemons?|limes?|apples?|bananas?|berries|herbs?|parsley|cilantro|basil|ginger|mushrooms?|zucchini|cucumber|avocado|scallions?|shallots?|kale|broccoli)\b/i],
-  ["Bakery", /\b(bread|buns?|rolls?|tortillas?|pita|baguette|naan)\b/i],
-  ["Frozen", /\bfrozen\b/i],
-  ["Pantry", /\b(flour|sugar|rice|pasta|noodles|oil|vinegar|stock|broth|beans|lentils|oats|honey|syrup|sauce|baking|vanilla|cocoa|chocolate|canned|coconut milk|nuts?|yeast)\b/i],
+  ["Pantry", /\b(stock|broth|sauce|paste|canned|tinned|diced tomato(es)?|coconut milk|condensed milk|evaporated milk|cornflour|flour|baked beans|beanz)\b/i],
+  ["Frozen", /\b(frozen|ice)\b/i],
+  ["Meat & Seafood", /\b(chicken|beef|pork|lamb|turkey|bacon|sausages?|ham|steaks?|fillets?|striploin|sirloin|scotch|tri-tip|brisket|ribs?|belly|mince|fish|salmon|tuna|shrimp|prawns?|cod)\b/i],
+  ["Dairy & Eggs", /\b(milk|cream|butter|cheese|yogh?urt|eggs?|yolks?|parmesan|mozzarella|cheddar|ricotta|sour cream)\b/i],
+  ["Spices", /\b(salt|pepper|peppercorns|cumin|paprika|cinnamon|oregano|thyme|rosemary|chil(l)?i (flakes|powder)|curry powder|five-spice|nutmeg|turmeric|spice|seasoning|bay lea)/i],
+  ["Pantry", /\b(sugar|honey|rice|pasta|spaghetti|penne|noodles|oil|vinegar|soy|mustard|worcestershire|beans|lentils|oats|syrup|baking|vanilla|cocoa|chocolate|nuts?|yeast)\b/i],
+  ["Produce", /\b(onions?|garlic|tomato(es)?|potato(es)?|carrots?|celery|lettuce|spinach|peppers?|capsicums?|chil(l)?ies|lemons?|limes?|apples?|bananas?|berries|herbs?|parsley|cilantro|coriander|basil|ginger|mushrooms?|zucchini|cucumber|avocado|scallions?|spring onions?|shallots?|kale|broccoli|corn)\b/i],
+  ["Bakery", /\b(bread|buns?|rolls?|tortillas?|pita|baguette|naan|brioche)\b/i],
+  ["Drinks", /\b(wine|beer|soda|sprite|juice)\b/i],
 ];
 
 const guessAisle = (name) => AISLES.find(([, re]) => re.test(name))?.[0] || "Other";
