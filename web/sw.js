@@ -1,6 +1,6 @@
 // Service worker: makes the app work offline and receives things shared from Android's share menu.
 // Bump VERSION when you deploy changes so phones pick up the new files.
-const VERSION = "v10";
+const VERSION = "v11";
 const APP_CACHE = `recipe-book-${VERSION}`;
 const APP_FILES = [
   "./", "index.html", "styles.css", "app.js", "store.js", "localapi.js", "ai.js", "parse.js",
@@ -49,8 +49,10 @@ self.addEventListener("fetch", (event) => {
   if (request.method !== "GET") return;
 
   // Network first so updates show up right away; fall back to the cache when offline.
+  // cache: "no-cache" makes the browser check with GitHub every time (a quick "has it changed?"),
+  // instead of reusing its own copy for up to 10 minutes after we publish an update.
   event.respondWith(
-    fetch(request)
+    fetch(request.url, { cache: "no-cache", credentials: "same-origin" })
       .then((res) => {
         if (res.ok) {
           const copy = res.clone();

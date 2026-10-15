@@ -296,3 +296,9 @@ details summary { cursor: pointer; }
 .list-tag { display: inline-block; margin-left: 6px; font-size: 12px; font-weight: 700; color: var(--ok); white-space: nowrap; }
 .list-tag.bought { color: var(--muted); }
 .iconbtn.on-list { color: var(--ok); font-size: 18px; font-weight: 800; }
+.update-bar {
+  position: fixed; left: 12px; right: 12px; top: max(64px, calc(env(safe-area-inset-top) + 56px)); z-index: 70;
+  display: flex; gap: 10px; align-items: center; justify-content: space-between;
+  background: var(--text); color: var(--bg); padding: 10px 12px 10px 16px; border-radius: 14px; box-shadow: var(--shadow); font-weight: 600;
+}
+@media (min-width: 760px) { .update-bar { left: auto; width: 420px; } }

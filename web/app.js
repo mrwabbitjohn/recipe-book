@@ -1683,9 +1683,31 @@ async function fillMissingPhotos({ manual = false } = {}) {
   if (location.hash === "#/settings") viewSettings();
 }
 
+// ---------- app updates ----------
+// Checks for a new version whenever the app comes to the front (Android often resumes it from
+// memory instead of reloading), and offers a one-tap update rather than reloading mid-cooking.
+function watchForUpdates() {
+  if (!("serviceWorker" in navigator)) return;
+  const hadController = Boolean(navigator.serviceWorker.controller); // false on the very first install
+  navigator.serviceWorker.register("./sw.js", { updateViaCache: "none" }).then((reg) => {
+    document.addEventListener("visibilitychange", () => {
+      if (document.visibilityState === "visible") reg.update().catch(() => {});
+    });
+  }).catch(() => {});
+  navigator.serviceWorker.addEventListener("controllerchange", () => {
+    if (!hadController || document.getElementById("update-bar")) return;
+    const bar = document.createElement("div");
+    bar.id = "update-bar";
+    bar.className = "update-bar";
+    bar.innerHTML = `<span>A new version of Recipe Book is ready.</span><button class="btn small primary">Update</button>`;
+    bar.querySelector("button").addEventListener("click", () => location.reload());
+    document.body.appendChild(bar);
+  });
+}
+
 // ---------- boot ----------
 async function boot() {
-  if ("serviceWorker" in navigator) navigator.serviceWorker.register("./sw.js").catch(() => {});
+  watchForUpdates();
   requestPersistence();
   try {
     state.stores = (await api("/api/stores")).stores;
