@@ -51,6 +51,19 @@ function formatMinutes(m) {
   return sec && sec < 60 ? `${min} min ${sec} sec` : `${Math.round(m)} min`;
 }
 
+// iPhone/iPad (iPadOS reports itself as a Mac with touch). On iOS only Safari can add to the home screen,
+// there's no share menu target, and Safari clears data of sites not added to the home screen after ~7 days.
+const isIOS = /iPad|iPhone|iPod/.test(navigator.userAgent) || (navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1);
+const isIOSSafari = isIOS && !/CriOS|FxiOS|EdgiOS|OPiOS/.test(navigator.userAgent);
+const isInstalled = () => matchMedia("(display-mode: standalone)").matches || navigator.standalone === true;
+const browserName = isIOS ? "Safari" : "Chrome";
+
+const installSteps = () => isIOS
+  ? isIOSSafari
+    ? `In Safari, tap the <b>Share</b> button (the square with an arrow) → <b>Add to Home Screen</b> → <b>Add</b>. Then always open Recipe Book from the home screen icon.`
+    : `On iPhone, only Safari can install apps like this. Open this page in <b>Safari</b>, then tap <b>Share</b> → <b>Add to Home Screen</b>.`
+  : `In Chrome, tap the <b>⋮</b> menu → <b>Add to Home screen</b> → <b>Install</b>.`;
+
 // A stable colour per recipe for cards without a photo.
 const hueFor = (text) => [...String(text)].reduce((h, c) => (h * 31 + c.charCodeAt(0)) % 360, 7);
 
@@ -176,6 +189,7 @@ async function viewList() {
       <button class="chip" data-tag="__fav">★ Favorites</button>
       ${tags.map((t) => `<button class="chip" data-tag="${esc(t)}">${esc(t)}</button>`).join("")}
     </div>` : ""}
+    ${isIOS && !isInstalled() ? `<div class="notice"><b>Add Recipe Book to your Home Screen</b> so Safari doesn't delete your recipes after a week of not visiting. ${installSteps()}</div>` : ""}
     <div id="grid"></div>
     <a class="btn primary fab" href="#/import">${icon.plus} Import recipe</a>`;
 
@@ -841,7 +855,9 @@ async function viewImport(query = "") {
       <button data-tab="text">📝 Text</button>
     </div>
     <div class="card panel" id="panel"></div>
-    <p class="muted" style="font-size:13px;margin-top:12px">Tip: from Chrome, YouTube or your gallery, tap <b>Share → Recipe Book</b> to send a link, photo or video straight here.</p>`;
+    <p class="muted" style="font-size:13px;margin-top:12px">${isIOS
+      ? "Tip: in Safari, YouTube or any app, copy the link and paste it in the Link tab. For photos and videos, use the Photo/Video tab to pick them from your library."
+      : "Tip: from Chrome, YouTube or your gallery, tap <b>Share → Recipe Book</b> to send a link, photo or video straight here."}</p>`;
 
   const panel = app.querySelector("#panel");
   const setTab = (t) => {
@@ -1053,7 +1069,7 @@ async function viewSettings() {
   const lastBackup = await getMeta("lastBackup", null);
   const persisted = await navigator.storage?.persisted?.().catch(() => false);
   const est = await navigator.storage?.estimate?.().catch(() => null);
-  const standalone = matchMedia("(display-mode: standalone)").matches;
+  const standalone = isInstalled();
 
   app.innerHTML = `
     <a class="btn ghost small" href="#/">${icon.back} Recipes</a>
@@ -1061,8 +1077,10 @@ async function viewSettings() {
 
     ${standalone ? "" : `<h2>Install on your phone</h2>
     <div class="card panel">
-      <p style="margin-top:0">Install Recipe Book so it opens like an app, works offline, and shows up in your <b>Share</b> menu.</p>
-      ${installPrompt ? `<button class="btn primary" id="install">Install app</button>` : `<p class="muted" style="margin-bottom:0">In Chrome, tap the <b>⋮</b> menu → <b>Add to Home screen</b> → <b>Install</b>.</p>`}
+      <p style="margin-top:0">${isIOS
+        ? "Add Recipe Book to your Home Screen so it opens like an app, works offline, and Safari keeps your recipes (Safari deletes data from sites you haven't visited in about a week, but not from Home Screen apps)."
+        : "Install Recipe Book so it opens like an app, works offline, and shows up in your <b>Share</b> menu."}</p>
+      ${installPrompt ? `<button class="btn primary" id="install">Install app</button>` : `<p class="muted" style="margin-bottom:0">${installSteps()}</p>`}
     </div>`}
 
     <h2>AI</h2>
@@ -1111,7 +1129,7 @@ async function viewSettings() {
 
     <h2>Backup</h2>
     <div class="card panel">
-      <p style="margin-top:0">Your recipes live only on this phone. Save a backup to Google Drive now and then: if you clear Chrome's data or lose the phone, a backup is the only way to get them back.</p>
+      <p style="margin-top:0">Your recipes live only on this phone. Save a backup to ${isIOS ? "Files or iCloud Drive" : "Google Drive"} now and then: if you clear ${browserName}'s data or lose the phone, a backup is the only way to get them back.</p>
       <p class="muted" style="font-size:13px">${lastBackup ? `Last backup: ${new Date(lastBackup).toLocaleDateString()}` : "No backup yet."}</p>
       <div class="row">
         <button class="btn primary" id="backup">Save backup</button>
@@ -1121,7 +1139,7 @@ async function viewSettings() {
 
     <h2>Storage</h2>
     <div class="card panel">
-      <p style="margin:0">${persisted ? "✅ Protected: Chrome won't clear your recipes to free up space." : "Chrome may clear data if the phone runs very low on space. Installing the app usually prevents this."}</p>
+      <p style="margin:0">${persisted ? `✅ Protected: ${browserName} won't clear your recipes to free up space.` : `${browserName} may clear data if the phone runs low on space${isIOS ? " or you don't open the app for a while" : ""}. ${isIOS ? "Adding it to your Home Screen" : "Installing the app"} usually prevents this.`}</p>
       ${est ? `<p class="muted" style="font-size:13px;margin-bottom:0">Using ${(est.usage / 1048576).toFixed(1)} MB</p>` : ""}
     </div>`;
 

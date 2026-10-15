@@ -1,6 +1,6 @@
 # Recipe Book
 
-A recipe book that lives on your Android phone. AI (free Gemini, or Claude) reads recipes from links, photos (cookbook
+A recipe book that lives on your phone (Android, or iPhone via Safari → Add to Home Screen). AI (free Gemini, or Claude) reads recipes from links, photos (cookbook
 pages, handwritten cards, screenshots) or pasted text and turns them into ingredients, steps and timers.
 
 There's no server and nothing to keep running. The app files are hosted for free on GitHub Pages.
