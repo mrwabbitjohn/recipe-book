@@ -62,6 +62,7 @@ function cleanRecipe(input, existing = {}) {
     image: input.image || null,
     imageCredit: input.image ? String(input.imageCredit || "") : "",
     photoSearched: Boolean(input.photoSearched ?? existing.photoSearched), // don't auto-search again
+    stepsLinked: Boolean(input.stepsLinked ?? existing.stepsLinked), // steps tagged with their ingredients
     source: input.source || null,
     servings: num(input.servings),
     prepMinutes: num(input.prepMinutes),
@@ -84,7 +85,12 @@ function cleanRecipe(input, existing = {}) {
       })),
     steps: (input.steps || [])
       .filter((s) => s && String(s.text || "").trim())
-      .map((s) => ({ text: String(s.text).trim(), timerMinutes: num(s.timerMinutes) })),
+      .map((s) => ({
+        text: String(s.text).trim(),
+        timerMinutes: num(s.timerMinutes),
+        // ids of the ingredients this step uses; missing = not tagged yet (the app guesses from the text)
+        ...(Array.isArray(s.uses) ? { uses: s.uses.map(String) } : {}),
+      })),
   };
 }
 

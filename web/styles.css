@@ -302,3 +302,21 @@ details summary { cursor: pointer; }
   background: var(--text); color: var(--bg); padding: 10px 12px 10px 16px; border-radius: 14px; box-shadow: var(--shadow); font-weight: 600;
 }
 @media (min-width: 760px) { .update-bar { left: auto; width: 420px; } }
+
+/* ---------- ingredients under each step ---------- */
+.step-ings { margin-top: 8px; font-size: 15px; }
+.step-ings summary {
+  list-style: none; cursor: pointer; display: flex; align-items: center; gap: 6px;
+  color: var(--muted); padding: 6px 10px; border-radius: 10px; background: var(--surface-2);
+}
+.step-ings summary::-webkit-details-marker { display: none; }
+.step-ings summary .sum-text { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.step-ings summary::after { content: "▾"; flex: none; transition: transform .15s; }
+.step-ings[open] summary::after { transform: rotate(180deg); }
+.step-ings .sum-count { display: none; flex: 1; }
+.step-ings[open] .sum-text { display: none; }
+.step-ings[open] .sum-count { display: block; }
+.step-ings ul { margin: 6px 0 0; padding: 0 0 0 4px; list-style: none; display: grid; gap: 4px; }
+.step-ings li::before { content: "•"; color: var(--accent); margin-right: 8px; }
+.step.done .step-ings summary { opacity: .7; }
+.step > div { min-width: 0; } /* let the one-line ingredient summary shrink instead of widening the page */

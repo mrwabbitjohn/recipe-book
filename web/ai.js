@@ -55,9 +55,14 @@ const RECIPE_SCHEMA = {
       items: {
         type: "object",
         additionalProperties: false,
-        required: ["text", "timerMinutes"],
+        required: ["text", "timerMinutes", "ingredients"],
         properties: {
           text: { type: "string" },
+          ingredients: {
+            type: "array",
+            items: { type: "integer" },
+            description: "Numbers (1 = first in your ingredients list) of the ingredients added or used in this step",
+          },
           timerMinutes: {
             ...nullable("number"),
             description: "Main wait/cook time in this step, if any (e.g. 'simmer 20 minutes' -> 20)",
@@ -80,6 +85,7 @@ const SYSTEM = `You turn recipes into clean structured data for a personal recip
 - Keep units short (tsp, tbsp, cup, g, kg, ml, l, oz, lb, clove, can) or "" for countable items ("2 eggs").
 - Split steps into one clear action group each. Keep the original wording where reasonable.
 - For handwritten cards or photos of cookbook pages, read carefully; combine multiple photos into one recipe.
+- For each step, list the ingredients that step adds or uses (by their position in your ingredients list), so the cook sees them right at that step. Don't repeat ingredients that were combined in an earlier step (e.g. "pour in the sauce" doesn't list the sauce's ingredients again).
 - For cooking videos, use everything: what's said, on-screen text and captions, and what you can see being added. Turn timings mentioned or shown into step timers.
 - If there is no recipe in the input, set found=false and leave the other fields empty.`;
 
@@ -373,6 +379,44 @@ export async function pickPhoto(cfg, recipe, thumbs) {
   });
   const n = data.photo;
   return { index: Number.isInteger(n) && n >= 1 && n <= thumbs.length ? n - 1 : null, cost };
+}
+
+// ---------- which ingredients each step uses (for recipes saved before steps were tagged) ----------
+const LINK_SCHEMA = {
+  type: "object",
+  additionalProperties: false,
+  required: ["steps"],
+  properties: {
+    steps: {
+      type: "array",
+      items: {
+        type: "object",
+        additionalProperties: false,
+        required: ["step", "ingredients"],
+        properties: {
+          step: { type: "integer" },
+          ingredients: { type: "array", items: { type: "integer" } },
+        },
+      },
+    },
+  },
+};
+
+// Returns { links: Map(stepIndex -> [ingredientIndex]), cost }.
+export async function linkStepIngredients(cfg, recipe) {
+  const { data, cost } = await callStructured({
+    cfg: photoCfg(cfg),
+    tier: "cheap",
+    system: "You annotate recipes for a cooking app. For every step, list the numbers of the ingredients that step adds or uses, so the cook can see them right at that step. Don't repeat ingredients already combined in an earlier step (\"pour in the sauce\" doesn't list the sauce's ingredients again). A step that uses none gets an empty list.",
+    schema: LINK_SCHEMA,
+    content: [{ type: "text", text: recipeAsText(recipe) }],
+  });
+  const links = new Map();
+  for (const s of data.steps || []) {
+    const ings = (s.ingredients || []).filter((n) => Number.isInteger(n) && n >= 1 && n <= recipe.ingredients.length).map((n) => n - 1);
+    if (Number.isInteger(s.step) && s.step >= 1 && s.step <= recipe.steps.length) links.set(s.step - 1, ings);
+  }
+  return { links, cost };
 }
 
 // Cheap call used by Settings to check that a key works.

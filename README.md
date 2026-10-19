@@ -25,7 +25,9 @@ in Settings, using your own key:
 - **Photos**: recipes without a photo get one automatically: the AI writes search phrases, free openly
   licensed photos come from Openverse, and the AI picks the one that best shows the dish. Use
   *Change photo* on a recipe to pick another or use your own.
-- **Cooking**: tap steps to mark them done. Step timers beep, and the screen stays awake.
+- **Cooking**: tap steps to mark them done. Step timers beep, and the screen stays awake. Each step
+  shows the ingredients (and amounts, scaled to your servings) it uses; tap to expand. AI imports
+  tag them directly, older recipes are tagged in the background, and name matching fills in until then.
 - **Ingredients** (top-right button): scale servings, tick what you have, pick where to buy each item
   (remembered next time), and add items to the shopping list.
 - **Shopping list**: grouped by store, quantities merge across recipes, share the list.

@@ -2,7 +2,7 @@
 // Everything runs on the phone: data in IndexedDB, AI calls straight to Claude with your own key.
 import { api, withStores, exportBackup, importBackup, normalizeName } from "./localapi.js";
 import { getMeta, setMeta, requestPersistence } from "./store.js";
-import { MODELS, extractFromUrl, extractFromImages, extractFromText, extractFromVideo, testKey, askAboutRecipe, providerLabel, photoQueries, pickPhoto } from "./ai.js";
+import { MODELS, extractFromUrl, extractFromImages, extractFromText, extractFromVideo, testKey, askAboutRecipe, providerLabel, photoQueries, pickPhoto, linkStepIngredients } from "./ai.js";
 import { findPhotos, downloadPhoto, previewsFor, queriesFromTitle } from "./photos.js";
 import { testGeminiKey } from "./gemini.js";
 import { parseRecipeText, parseQty } from "./parse.js";
@@ -290,6 +290,7 @@ async function viewRecipe(id) {
           <span class="num">${i + 1}</span>
           <div>
             <p>${esc(s.text)}</p>
+            <div class="step-ings-slot" data-step="${i}"></div>
             ${s.timerMinutes ? `<div class="tools"><button class="timer" data-timer="${i}" data-min="${s.timerMinutes}"></button></div>` : ""}
           </div>
         </li>`).join("")}
@@ -313,6 +314,7 @@ async function viewRecipe(id) {
 
   // steps & timers
   app.querySelector("#steps").addEventListener("click", (e) => {
+    if (e.target.closest(".step-ings")) return;
     const timerBtn = e.target.closest("[data-timer]");
     if (timerBtn) {
       toggleTimer(`${id}:${timerBtn.dataset.timer}`, Number(timerBtn.dataset.min));
@@ -350,6 +352,25 @@ async function viewRecipe(id) {
 
   const scale = () => (recipe.servings && cook.servings ? cook.servings / recipe.servings : 1);
   const scaled = (q) => (q == null ? null : q * scale());
+
+  // Ingredients under each step, scaled to the chosen servings. Open/closed state survives re-renders.
+  function renderStepIngredients() {
+    app.querySelectorAll(".step-ings-slot").forEach((slot) => {
+      const step = recipe.steps[Number(slot.dataset.step)];
+      const ings = ingredientsForStep(recipe, step);
+      const wasOpen = slot.querySelector("details")?.open;
+      if (!ings.length) {
+        slot.innerHTML = "";
+        return;
+      }
+      const line = (i) => [i.estimated ? "≈" : "", formatQty(scaled(i.quantity)), i.unit, i.name].filter(Boolean).join(" ");
+      slot.innerHTML = `<details class="step-ings"${wasOpen ? " open" : ""}>
+        <summary><span class="sum-text">🥄 ${esc(ings.map(line).join(" · "))}</span><span class="sum-count">🥄 ${ings.length} ingredient${ings.length === 1 ? "" : "s"} for this step</span></summary>
+        <ul>${ings.map((i) => `<li><b>${esc([i.estimated ? "≈" : "", formatQty(scaled(i.quantity)), i.unit].filter(Boolean).join(" "))}</b> ${esc(i.name)}${i.note ? ` <span class="muted">${esc(i.note)}</span>` : ""}</li>`).join("")}</ul>
+      </details>`;
+    });
+  }
+  renderStepIngredients();
 
   // What's already on the shopping list, by ingredient name (an unticked entry wins over a bought one).
   let listed = new Map();
@@ -420,6 +441,7 @@ async function viewRecipe(id) {
     const serv = e.target.closest("[data-serv]");
     if (serv) {
       cook.servings = Math.max(1, cook.servings + Number(serv.dataset.serv));
+      renderStepIngredients();
       return renderDrawer();
     }
     if (e.target.closest("#add-all")) {
@@ -662,6 +684,79 @@ async function viewRecipe(id) {
   });
 }
 
+// ---------- which ingredients a step uses ----------
+// Tagged steps (AI) list ingredient ids in step.uses. Untagged steps fall back to spotting
+// ingredient names in the step text.
+const DESCRIPTORS = new Set(("fresh dried large small medium big chopped minced sliced diced grated ground whole skinless boneless " +
+  "cooked uncooked frozen raw ripe extra virgin finely roughly thinly peeled crushed smashed halved packed loosely of " +
+  "light dark thick red green white black brown yellow sweet hot mild cold warm optional plain").split(" "));
+const GENERIC = new Set("sauce oil powder water stock paste flakes seeds juice mix cubes".split(" "));
+const IGNORE = new Set(["leaves", "leaf"]); // "basil leaves" is just basil
+
+// Word forms to look for: "chillies" -> chilli/chilly, "tomatoes" -> tomato, "eggs" -> egg.
+function wordForms(w) {
+  if (w.endsWith("ies")) return [w.slice(0, -3) + "y", w.slice(0, -2)];
+  if (/(oes|ches|shes|sses)$/.test(w)) return [w.slice(0, -2)];
+  if (/[^s]s$/.test(w)) return [w.slice(0, -1)];
+  return [w];
+}
+
+// phrase: the ingredient minus descriptors ("chicken stock"); words: single words that may stand for it.
+// Names ending in a generic word ("chicken stock", "oyster sauce") only match as a whole phrase.
+function ingredientKeys(name) {
+  const words = name.toLowerCase().replace(/\(.*?\)/g, " ").replace(/[^a-z' -]/g, " ").split(/[\s-]+/)
+    .filter((w) => w.length > 2 && !DESCRIPTORS.has(w) && !IGNORE.has(w));
+  if (!words.length) return null;
+  const phrase = words.join(" ");
+  const genericHead = GENERIC.has(words.at(-1));
+  const single = words.length === 1 ? wordForms(words[0]) : genericHead ? [] : words.filter((w) => !GENERIC.has(w)).flatMap(wordForms);
+  return { phrase, single };
+}
+
+const containsWord = (text, w) => new RegExp(`\\b${w}(s|es)?\\b`).test(text); // w is letters/spaces only
+
+function ingredientsForStep(recipe, step) {
+  if (Array.isArray(step.uses)) return recipe.ingredients.filter((i) => step.uses.includes(i.id));
+  const text = ` ${step.text.toLowerCase().replace(/[^a-z' ]/g, " ")} `;
+  const keyed = recipe.ingredients.map((i) => ({ i, k: ingredientKeys(i.name) })).filter((x) => x.k);
+  const strong = keyed.filter(({ k }) => k.phrase.includes(" ") && containsWord(text, k.phrase));
+  const strongWords = strong.flatMap(({ k }) => k.phrase.split(" ").flatMap(wordForms));
+  return keyed.filter(({ i, k }) => {
+    if (strong.some((x) => x.i === i)) return true;
+    const hit = k.single.find((w) => containsWord(text, w));
+    // A loose match on a shared word ("tomato") loses to an ingredient whose full name is there ("tomato paste").
+    return hit && !strongWords.includes(hit);
+  }).map(({ i }) => i);
+}
+
+// Tags steps of older recipes with their ingredients using the AI (free with Gemini), in the background.
+let linkingSteps = false;
+async function fillStepLinks() {
+  if (linkingSteps || !navigator.onLine) return;
+  const cfg = await aiConfig();
+  if (!cfg.geminiKey && !cfg.claudeKey) return;
+  linkingSteps = true;
+  try {
+    const todo = (await api("/api/recipes")).filter((r) => !r.stepsLinked);
+    for (const summary of todo) {
+      const recipe = await api(`/api/recipes/${summary.id}`);
+      if (!recipe.steps.length || !recipe.ingredients.length) {
+        await api(`/api/recipes/${recipe.id}`, { method: "PUT", body: { stepsLinked: true } });
+        continue;
+      }
+      const { links, cost } = await linkStepIngredients(cfg, recipe);
+      if (cost) await addSpend(cost);
+      const steps = recipe.steps.map((st, n) =>
+        links.has(n) ? { ...st, uses: links.get(n).map((k) => recipe.ingredients[k].id) } : st);
+      await api(`/api/recipes/${recipe.id}`, { method: "PUT", body: { steps, stepsLinked: true } });
+    }
+  } catch (err) {
+    console.warn("Step tagging stopped:", err.message); // retried next time the app opens
+  } finally {
+    linkingSteps = false;
+  }
+}
+
 // ---------- step timers ----------
 let audioCtx;
 function beep() {
@@ -766,6 +861,12 @@ async function runAI(kind, payload, tier = "cheap") {
   const { recipe, cost, model } = await extractor(cfg, tier, payload);
   await addSpend(cost);
   const { imageUrl, ...rest } = recipe;
+  rest.ingredients = rest.ingredients.map((i) => ({ ...i, id: crypto.randomUUID() }));
+  rest.steps = rest.steps.map(({ ingredients: nums, ...st }) => ({
+    ...st,
+    uses: (nums || []).map((n) => rest.ingredients[n - 1]?.id).filter(Boolean),
+  }));
+  rest.stepsLinked = true;
   const ytId = kind === "video" && payload.link ? youtubeId(payload.link) : null;
   state.draft = await withStores({
     ...rest,
@@ -1325,7 +1426,9 @@ async function viewEditor(id) {
     });
     stepsEl.querySelectorAll("[data-s]").forEach((row) => {
       const s = recipe.steps[row.dataset.s];
-      s.text = row.querySelector("textarea").value;
+      const newText = row.querySelector("textarea").value;
+      if (newText !== s.text) delete s.uses;
+      s.text = newText;
       s.timerMinutes = row.querySelector("input").value;
     });
   }
@@ -1431,7 +1534,10 @@ async function viewEditor(id) {
       state.draft = null;
       state.lastImport = null;
       toast("Saved");
-      if (!saved.image && !saved.photoSearched) setTimeout(fillMissingPhotos, 500);
+      setTimeout(async () => {
+        if (!saved.image && !saved.photoSearched) await fillMissingPhotos();
+        if (!saved.stepsLinked) await fillStepLinks();
+      }, 500);
       location.hash = `#/recipe/${saved.id}`;
     } catch (err) {
       toast(err.message);
@@ -1715,6 +1821,9 @@ async function boot() {
   refreshShoppingBadge();
   window.addEventListener("hashchange", router);
   router();
-  setTimeout(fillMissingPhotos, 1500);
+  setTimeout(async () => {
+    await fillMissingPhotos();
+    await fillStepLinks();
+  }, 1500);
 }
 boot();

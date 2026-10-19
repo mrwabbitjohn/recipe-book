@@ -30,8 +30,9 @@ function toGeminiInput(content) {
   });
 }
 
-// Older model with its own free quota, used when the main one is overloaded or rate limited.
-const FALLBACK_MODEL = { id: "gemini-2.5-flash", label: "Gemini 2.5 Flash" };
+// Second free model with its own quota, used when the main one is overloaded or rate limited.
+// (gemini-2.5-flash was used here before, but Google no longer offers it to new accounts.)
+const FALLBACK_MODEL = { id: "gemini-3.6-flash", label: "Gemini 3.6 Flash" };
 
 function errorInfo(status, body) {
   const err = Array.isArray(body) ? body[0]?.error : body?.error;
@@ -47,7 +48,8 @@ function friendlyError({ status, reason, message }) {
     return new GeminiError("Your Gemini API key was rejected. Check it in Settings.");
   }
   if (status === 429) {
-    return new GeminiError("You've hit Gemini's free limit for now. Wait a minute (or until tomorrow if it's the daily limit), or switch to Claude in Settings.");
+    const daily = /per ?day|daily|RequestsPerDay/i.test(message);
+    return new GeminiError(`${daily ? "You've used today's free Gemini requests. They reset tomorrow" : "Gemini's free per-minute limit was hit. Wait a minute and try again"}, or switch to Claude in Settings.${message ? ` (Google said: "${message.slice(0, 220)}")` : ""}`);
   }
   if (status === 403) return new GeminiError(`Your Gemini key isn't allowed to use this. Google said: ${message || reason || "permission denied"}`);
   const said = message ? ` Google said: "${message}"` : "";
@@ -99,6 +101,17 @@ function parseLooseJson(text) {
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
+// Space requests out a little so bursts (background photo search, step tagging) stay under the
+// free tier's per-minute limit.
+const MIN_GAP_MS = 2500;
+let nextSlot = 0;
+async function pace() {
+  const now = Date.now();
+  const wait = Math.max(0, nextSlot - now);
+  nextSlot = Math.max(now, nextSlot) + MIN_GAP_MS;
+  if (wait) await sleep(wait);
+}
+
 export async function geminiStructured({ apiKey, system, schema, content, webFetch = false, thinking = "low" }) {
   if (!apiKey) throw new GeminiError("Add your Gemini API key in Settings to use AI features.");
   const geminiSchema = toGeminiSchema(schema);
@@ -114,17 +127,18 @@ export async function geminiStructured({ apiKey, system, schema, content, webFet
   ];
 
   let lastInfo = null;
+  let primaryInfo = null; // the main model's error is the one worth showing
   for (let i = 0; i < attempts.length; i++) {
     const { model, structured, waitMs } = attempts[i];
     if (waitMs) await sleep(waitMs);
+    await pace();
     const body = {
       model: model.id,
       input: toGeminiInput(content),
       system_instruction: structured ? system : jsonInstructions,
       generation_config: {
         max_output_tokens: 16000,
-        // thinking_level is a Gemini 3 setting; leave the older fallback model on its defaults.
-        ...(model === GEMINI_MODEL ? { thinking_level: thinking } : {}),
+        thinking_level: thinking,
       },
       store: false,
       ...(webFetch ? { tools: [{ type: "url_context" }] } : {}),
@@ -137,6 +151,7 @@ export async function geminiStructured({ apiKey, system, schema, content, webFet
     } catch (err) {
       if (!(err instanceof HttpFailure)) throw err;
       lastInfo = err.info;
+      if (model === GEMINI_MODEL && !primaryInfo) primaryInfo = err.info;
       const { status, reason, message } = err.info;
       if (reason === "API_KEY_INVALID" || /api key not valid/i.test(message) || status === 403) throw friendlyError(err.info);
       if (status === 429) {
@@ -145,7 +160,7 @@ export async function geminiStructured({ apiKey, system, schema, content, webFet
           i = attempts.length - 2;
           continue;
         }
-        throw friendlyError(err.info);
+        throw friendlyError(primaryInfo || err.info);
       }
       // A 400 on a structured attempt usually means the schema/format wasn't accepted: skip to plain JSON.
       if (status === 400 && structured) {
@@ -158,6 +173,7 @@ export async function geminiStructured({ apiKey, system, schema, content, webFet
 
     if (interaction.status === "failed") {
       lastInfo = { status: 500, reason: "", message: interaction.errors?.[0]?.message || "the request failed" };
+      if (model === GEMINI_MODEL && !primaryInfo) primaryInfo = lastInfo;
       continue;
     }
     if (interaction.status === "incomplete") throw new GeminiError("Gemini's answer was cut off. Please try again.");
@@ -169,7 +185,7 @@ export async function geminiStructured({ apiKey, system, schema, content, webFet
       lastInfo = { status: 500, reason: "", message: "the answer wasn't valid JSON" };
     }
   }
-  throw friendlyError(lastInfo || { status: 500, reason: "", message: "" });
+  throw friendlyError(primaryInfo || lastInfo || { status: 500, reason: "", message: "" });
 }
 
 // Cheap check used by Settings: list models with the key.
