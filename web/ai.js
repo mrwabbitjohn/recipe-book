@@ -124,7 +124,7 @@ async function callStructured({ cfg, tier, system, schema, content, webFetch = f
     // Gemini's free tier has one model; "try harder" just thinks harder.
     return geminiStructured({
       apiKey: cfg.geminiKey, system, schema, content, webFetch, quick,
-      thinking: fast ? "minimal" : tier === "strong" ? "high" : "low",
+      thinking: tier === "strong" ? "high" : "low", // gemini-3.8-flash rejects "minimal"
     });
   }
   if (fast) effort = "low";

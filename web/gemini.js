@@ -129,6 +129,7 @@ export async function geminiStructured({ apiKey, system, schema, content, webFet
 
   let lastInfo = null;
   let primaryInfo = null; // the main model's error is the one worth showing
+  let sendThinking = true; // dropped if a model rejects the thinking level
   for (let i = 0; i < attempts.length; i++) {
     const { model, structured, waitMs } = attempts[i];
     if (waitMs) await sleep(waitMs);
@@ -139,7 +140,7 @@ export async function geminiStructured({ apiKey, system, schema, content, webFet
       system_instruction: structured ? system : jsonInstructions,
       generation_config: {
         max_output_tokens: 16000,
-        thinking_level: thinking,
+        ...(sendThinking ? { thinking_level: thinking } : {}),
       },
       store: false,
       ...(webFetch ? { tools: [{ type: "url_context" }] } : {}),
@@ -154,6 +155,13 @@ export async function geminiStructured({ apiKey, system, schema, content, webFet
       lastInfo = err.info;
       if (model === GEMINI_MODEL && !primaryInfo) primaryInfo = err.info;
       const { status, reason, message } = err.info;
+      // A model that doesn't accept this thinking level: retry the same attempt without it.
+      if (status === 400 && sendThinking && /thinking/i.test(message)) {
+        sendThinking = false;
+        if (primaryInfo === err.info) primaryInfo = null;
+        i--;
+        continue;
+      }
       if (reason === "API_KEY_INVALID" || /api key not valid/i.test(message) || status === 403) throw friendlyError(err.info);
       if (status === 429) {
         // Try the fallback model's separate quota once, otherwise report the limit.
