@@ -117,14 +117,17 @@ export const providerLabel = (cfg, tier = "cheap") =>
   cfg.provider === "gemini" ? GEMINI_MODEL.label : MODELS[tier].label;
 
 // One structured-output call (Gemini or Claude), with friendly errors.
-async function callStructured({ cfg, tier, system, schema, content, webFetch = false, effort }) {
+// fast: small jobs (photo search, step tagging, tests) that need little thinking.
+// quick: a single attempt with no retries, for "Test AI".
+async function callStructured({ cfg, tier, system, schema, content, webFetch = false, effort, fast = false, quick = false }) {
   if (cfg.provider === "gemini") {
     // Gemini's free tier has one model; "try harder" just thinks harder.
     return geminiStructured({
-      apiKey: cfg.geminiKey, system, schema, content, webFetch,
-      thinking: tier === "strong" ? "high" : "low",
+      apiKey: cfg.geminiKey, system, schema, content, webFetch, quick,
+      thinking: fast ? "minimal" : tier === "strong" ? "high" : "low",
     });
   }
+  if (fast) effort = "low";
   const apiKey = cfg.claudeKey;
   if (!apiKey) throw new ImportError("Add your Anthropic API key in Settings to use AI features.");
   const model = MODELS[tier];
@@ -346,6 +349,7 @@ export async function photoQueries(cfg, recipe) {
   const { data, cost } = await callStructured({
     cfg: photoCfg(cfg),
     tier: "cheap",
+    fast: true,
     system: "You write photo-library search phrases for dishes. Return 3 short phrases (1-3 words each), most specific first, using the dish's common name as people would tag a food photo (e.g. 'pad kra pao', 'thai basil pork', 'basil stir fry'). For sauces, dips, marinades or drinks, search for the thing itself. English, lowercase, no brand names.",
     schema: QUERY_SCHEMA,
     content: [{ type: "text", text: `Dish: ${recipe.title}\n${recipe.description || ""}\nMain ingredients: ${(recipe.ingredientNames || recipe.ingredients?.map((i) => i.name) || []).slice(0, 8).join(", ")}` }],
@@ -373,6 +377,7 @@ export async function pickPhoto(cfg, recipe, thumbs) {
   const { data, cost } = await callStructured({
     cfg: photoCfg(cfg),
     tier: "cheap",
+    fast: true,
     system: "You choose cover photos for recipes in a personal recipe app.",
     schema: PICK_SCHEMA,
     content,
@@ -407,6 +412,7 @@ export async function linkStepIngredients(cfg, recipe) {
   const { data, cost } = await callStructured({
     cfg: photoCfg(cfg),
     tier: "cheap",
+    fast: true,
     system: "You annotate recipes for a cooking app. For every step, list the numbers of the ingredients that step adds or uses, so the cook can see them right at that step. Don't repeat ingredients already combined in an earlier step (\"pour in the sauce\" doesn't list the sauce's ingredients again). A step that uses none gets an empty list.",
     schema: LINK_SCHEMA,
     content: [{ type: "text", text: recipeAsText(recipe) }],
@@ -417,6 +423,17 @@ export async function linkStepIngredients(cfg, recipe) {
     if (Number.isInteger(s.step) && s.step >= 1 && s.step <= recipe.steps.length) links.set(s.step - 1, ings);
   }
   return { links, cost };
+}
+
+// "Test AI" in Settings: one tiny request to the selected provider, no retries.
+export async function testAI(cfg) {
+  const { data, model } = await callStructured({
+    cfg, tier: "cheap", fast: true, quick: true,
+    system: "Reply with three short search phrases for the dish.",
+    schema: QUERY_SCHEMA,
+    content: [{ type: "text", text: "Dish: Spaghetti Bolognese" }],
+  });
+  return { reply: (data.queries || []).join(", "), model };
 }
 
 // Cheap call used by Settings to check that a key works.

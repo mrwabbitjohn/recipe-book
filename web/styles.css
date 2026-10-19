@@ -320,3 +320,6 @@ details summary { cursor: pointer; }
 .step-ings li::before { content: "•"; color: var(--accent); margin-right: 8px; }
 .step.done .step-ings summary { opacity: .7; }
 .step > div { min-width: 0; } /* let the one-line ingredient summary shrink instead of widening the page */
+
+.test-ai { padding-top: 12px; border-top: 1px solid var(--border); }
+.test-ai p { margin: 8px 0 0; font-size: 13px; }

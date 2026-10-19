@@ -1,6 +1,6 @@
 // Service worker: makes the app work offline and receives things shared from Android's share menu.
 // Bump VERSION when you deploy changes so phones pick up the new files.
-const VERSION = "v13";
+const VERSION = "v14";
 const APP_CACHE = `recipe-book-${VERSION}`;
 const APP_FILES = [
   "./", "index.html", "styles.css", "app.js", "store.js", "localapi.js", "ai.js", "parse.js",
@@ -8,8 +8,17 @@ const APP_FILES = [
   "icons/icon.svg", "icons/icon-192.png", "icons/icon-512.png",
 ];
 
+// On the local preview server, always use the network so edits show up immediately.
+const DEV = ["localhost", "127.0.0.1"].includes(location.hostname);
+
+// Download every app file fresh (cache: "reload" skips the browser's 10-minute copy), so a new
+// version is complete before it takes over.
 self.addEventListener("install", (event) => {
-  event.waitUntil(caches.open(APP_CACHE).then((c) => c.addAll(APP_FILES)).then(() => self.skipWaiting()));
+  event.waitUntil(
+    caches.open(APP_CACHE)
+      .then((c) => c.addAll(APP_FILES.map((f) => new Request(f, { cache: "reload" }))))
+      .then(() => self.skipWaiting()),
+  );
 });
 
 self.addEventListener("activate", (event) => {
@@ -48,18 +57,26 @@ self.addEventListener("fetch", (event) => {
   }
   if (request.method !== "GET") return;
 
-  // Network first so updates show up right away; fall back to the cache when offline.
-  // cache: "no-cache" makes the browser check with GitHub every time (a quick "has it changed?"),
-  // instead of reusing its own copy for up to 10 minutes after we publish an update.
+  const fromNetwork = () =>
+    fetch(request.url, { cache: "no-cache", credentials: "same-origin" }).then((res) => {
+      if (res.ok) {
+        const copy = res.clone();
+        caches.open(APP_CACHE).then((c) => c.put(request, copy));
+      }
+      return res;
+    });
+
+  if (DEV) {
+    event.respondWith(fromNetwork().catch(() => caches.match(request, { ignoreSearch: true })));
+    return;
+  }
+
+  // Cache first: the app opens instantly from the copy on the phone. New versions arrive as a new
+  // service worker (checked whenever the app comes to the front), which shows the "Update" bar.
   event.respondWith(
-    fetch(request.url, { cache: "no-cache", credentials: "same-origin" })
-      .then((res) => {
-        if (res.ok) {
-          const copy = res.clone();
-          caches.open(APP_CACHE).then((c) => c.put(request, copy));
-        }
-        return res;
-      })
-      .catch(async () => (await caches.match(request, { ignoreSearch: true })) || caches.match("index.html")),
+    caches.open(APP_CACHE)
+      .then((c) => c.match(request, { ignoreSearch: true }))
+      .then((hit) => hit || fromNetwork())
+      .catch(async () => (await caches.match("index.html")) || Response.error()),
   );
 });

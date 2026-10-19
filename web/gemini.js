@@ -112,14 +112,15 @@ async function pace() {
   if (wait) await sleep(wait);
 }
 
-export async function geminiStructured({ apiKey, system, schema, content, webFetch = false, thinking = "low" }) {
+// quick: one attempt, no retries or fallback model (for "Test AI", which should answer fast).
+export async function geminiStructured({ apiKey, system, schema, content, webFetch = false, thinking = "low", quick = false }) {
   if (!apiKey) throw new GeminiError("Add your Gemini API key in Settings to use AI features.");
   const geminiSchema = toGeminiSchema(schema);
   const jsonInstructions = `${system}\n\nReply with ONLY a JSON object (no prose, no code fences) matching this JSON schema:\n${JSON.stringify(geminiSchema)}`;
 
   // Each attempt is a little more conservative than the last, so a temporary overload,
   // an unsupported request option, or a busy model doesn't stop the import.
-  const attempts = [
+  const attempts = quick ? [{ model: GEMINI_MODEL, structured: true }] : [
     { model: GEMINI_MODEL, structured: true },
     { model: GEMINI_MODEL, structured: true, waitMs: 1500 },
     { model: GEMINI_MODEL, structured: false },

@@ -2,7 +2,7 @@
 // Everything runs on the phone: data in IndexedDB, AI calls straight to Claude with your own key.
 import { api, withStores, exportBackup, importBackup, normalizeName } from "./localapi.js";
 import { getMeta, setMeta, requestPersistence } from "./store.js";
-import { MODELS, extractFromUrl, extractFromImages, extractFromText, extractFromVideo, testKey, askAboutRecipe, providerLabel, photoQueries, pickPhoto, linkStepIngredients } from "./ai.js";
+import { MODELS, extractFromUrl, extractFromImages, extractFromText, extractFromVideo, testKey, testAI, askAboutRecipe, providerLabel, photoQueries, pickPhoto, linkStepIngredients } from "./ai.js";
 import { findPhotos, downloadPhoto, previewsFor, queriesFromTitle } from "./photos.js";
 import { testGeminiKey } from "./gemini.js";
 import { parseRecipeText, parseQty } from "./parse.js";
@@ -1191,9 +1191,11 @@ async function viewSettings() {
         <span><b>Gemini (free)</b><br><span class="muted">Google's free tier. Daily limits, but plenty for personal use. Google may use what you send to improve its products.</span></span></label>
       <label class="choice"><input type="radio" name="provider" value="claude" ${cfg.provider === "claude" ? "checked" : ""}>
         <span><b>Claude (paid)</b><br><span class="muted">Usually under 1¢ per import, billed to your Anthropic account.</span></span></label>
+      <div class="test-ai">
+        <button class="btn small" id="test-ai">Test AI</button>
+        <p id="test-ai-msg" class="muted" hidden></p>
+      </div>
     </div>
-
-    <div class="row" style="margin:-4px 0 4px"><button class="btn small" id="test-ai">Test AI</button><span id="test-ai-msg" class="muted" style="font-size:13px;flex:1"></span></div>
 
     ${keyCard({
       id: "gemini", title: "Gemini API key (free)", value: cfg.geminiKey, placeholder: "AIza…",
@@ -1267,12 +1269,18 @@ async function viewSettings() {
   // Runs one tiny real request with the selected AI and shows exactly what happened.
   app.querySelector("#test-ai").addEventListener("click", async () => {
     const msg = app.querySelector("#test-ai-msg");
+    const btn = app.querySelector("#test-ai");
+    msg.hidden = false;
     msg.textContent = "Testing…";
+    btn.disabled = true;
+    const started = Date.now();
     try {
-      const res = await photoQueries({ ...cfg, geminiKey: cfg.provider === "gemini" ? cfg.geminiKey : "" }, { title: "Spaghetti Bolognese", ingredientNames: ["beef mince", "tomatoes"] });
-      msg.textContent = `✅ ${cfg.provider === "gemini" ? "Gemini" : "Claude"} works (replied: ${res.queries.join(", ")})`;
+      const res = await testAI(cfg);
+      msg.textContent = `✅ ${res.model} works (answered in ${((Date.now() - started) / 1000).toFixed(1)} s: ${res.reply})`;
     } catch (err) {
       msg.textContent = `❌ ${err.message}`;
+    } finally {
+      btn.disabled = false;
     }
   });
 
